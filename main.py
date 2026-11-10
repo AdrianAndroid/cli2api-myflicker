@@ -222,7 +222,12 @@ async def _lan_guard(request: Request, call_next):
 
 
 def queue_depth() -> Optional[int]:
+    """Depth of the default queue; identity-scoped depth is reported per request."""
     return broker_queue_depth(CELERY_QUEUE)
+
+
+def identity_queue_depth(identity: Identity) -> Optional[int]:
+    return broker_queue_depth(identity.queue)
 
 
 def lan_urls(port: int) -> List[str]:
@@ -465,13 +470,13 @@ async def submit_task(
                 },
             )
 
-    depth = queue_depth()
+    depth = identity_queue_depth(identity)
     if MAX_QUEUE_DEPTH and depth is not None and depth >= MAX_QUEUE_DEPTH:
         raise HTTPException(
             429,
             {
                 "code": "queue_full",
-                "message": f"queue depth {depth} >= MAX_QUEUE_DEPTH {MAX_QUEUE_DEPTH}",
+                "message": f"your queue has {depth} waiting tasks (limit {MAX_QUEUE_DEPTH})",
                 "queue_depth": depth,
                 "max_queue_depth": MAX_QUEUE_DEPTH,
             },
@@ -560,7 +565,7 @@ async def submit_task(
                 "submitted_at": submitted_at,
             },
             task_id=task_id,
-            queue=CELERY_QUEUE,
+            queue=identity.queue,
         )
     except Exception as exc:
         logger.exception("failed to enqueue task %s", task_id)
@@ -581,7 +586,7 @@ async def submit_task(
             503, {"code": "enqueue_failed", "message": f"could not enqueue task: {exc}"}
         )
 
-    log_event(task_id, "task.enqueued", queue=CELERY_QUEUE, celery_task_id=task_id)
+    log_event(task_id, "task.enqueued", queue=identity.queue, celery_task_id=task_id)
     return JSONResponse(
         status_code=202,
         content={
@@ -814,7 +819,8 @@ async def health(
         "redis": {"ok": redis_ok, "error": redis_error},
         "worker": {"ok": worker_ok, "online_workers": online_workers, "error": worker_error},
         "queue": CELERY_QUEUE,
-        "queue_depth": queue_depth(),
+        "queue_depth": identity_queue_depth(identity),
+        "queue": identity.queue,
         "max_queue_depth": MAX_QUEUE_DEPTH,
         "myflicker_bin": MYFLICKER_BIN,
         "myflicker_cwd": MYFLICKER_CWD,
@@ -838,8 +844,8 @@ async def health(
             "admin_key_enabled": bool(ADMIN_API_KEY),
         },
         "serial_execution": {
-            "concurrency": 1,
-            "worker_command": "celery -A celery_tasks.celery_app worker --concurrency=1 --loglevel=info",
+            "concurrency": "1 per user (parallel across users)",
+            "worker_command": "python worker_supervisor.py   # one --concurrency=1 worker per API key",
         },
     }
     return JSONResponse(status_code=200 if redis_ok else 503, content=payload)

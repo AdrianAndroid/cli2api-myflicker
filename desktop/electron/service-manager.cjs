@@ -266,23 +266,9 @@ class ServiceManager extends EventEmitter {
         this.setStep("worker", "done", `复用在线 worker ×${health.worker.online_workers}`);
       } else {
         this.setStep("worker", "active", "celery --concurrency=1 …");
-        this.spawnService(
-          "worker",
-          python,
-          [
-            "-m",
-            "celery",
-            "-A",
-            "celery_tasks.celery_app",
-            "worker",
-            "--concurrency=1",
-            "--loglevel=info",
-            "-Q",
-            env.CELERY_QUEUE || "myflicker",
-          ],
-          env,
-          this.projectRoot,
-        );
+        // one single-concurrency worker per API key: users run in parallel,
+        // each user's own tasks stay serial (myflicker lock is per-workspace)
+        this.spawnService("worker", python, ["worker_supervisor.py"], env, this.projectRoot);
         await waitFor(() => /ready\./i.test(this.recent.worker) || /concurrency:/i.test(this.recent.worker), {
           timeoutMs: 30000,
           label: "celery worker ready",
@@ -294,7 +280,7 @@ class ServiceManager extends EventEmitter {
           },
           { timeoutMs: 10000, intervalMs: 500, label: "worker 注册到 broker" },
         ).catch(() => null);
-        this.setStep("worker", "done", "concurrency=1（严格串行）");
+        this.setStep("worker", "done", "每用户串行 · 用户间并行");
       }
 
       // 4) final self check

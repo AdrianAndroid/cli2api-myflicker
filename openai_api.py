@@ -160,9 +160,9 @@ def _submit(prompt: str, args_prefix: List[str], timeout: float, cwd: Optional[s
             "submitted_at": submitted_at,
         },
         task_id=task_id,
-        queue=CELERY_QUEUE,
+        queue=identity.queue,
     )
-    log_event(task_id, "task.enqueued", queue=CELERY_QUEUE, celery_task_id=task_id, via="openai")
+    log_event(task_id, "task.enqueued", queue=identity.queue, celery_task_id=task_id, via="openai")
     return {"task_id": task_id, "submitted_at": submitted_at, "command": command}
 
 

@@ -34,6 +34,10 @@ class Identity:
     is_admin: bool = False
 
     @property
+    def queue(self) -> str:
+        return f"{os.getenv('CELERY_QUEUE', 'myflicker')}:{self.label}"
+
+    @property
     def workspace(self) -> Path:
         return workspace_root() / self.label
 

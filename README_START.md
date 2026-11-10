@@ -30,8 +30,7 @@ FastAPI (main.py)  ──apply_async──►  Redis broker(db1)  ──►  Cel
 ```
 
 - 网关进程**从不**执行 myflicker，只入队；执行逻辑 100% 在 `celery_tasks.run_myflicker` 内。
-- Worker 单并发 = 天然排队（FIFO），不会出现 myflicker 锁冲突。
-- `worker_prefetch_multiplier=1` + `task_acks_late=True`，避免预取导致的任务滞留。
+- 每 key 一个 `--concurrency=1` worker：用户内串行、用户间并行；`worker_prefetch_multiplier=1` + `task_acks_late=True`。
 
 ## 2. 安装
 
@@ -105,8 +104,13 @@ redis-cli ping
 ```bash
 cd /Users/zhaojian/Desktop/cli2api-myflicker
 source .venv/bin/activate
-celery -A celery_tasks.celery_app worker --concurrency=1 --loglevel=info -Q myflicker
+python worker_supervisor.py   # 每个 API_KEY 一个 --concurrency=1 的 worker
 ```
+
+> 重要：**myflicker 的锁是按工作目录的**，不同目录可以并行。监督器给每个 API key
+> 起一个独立的串行 worker（队列 `myflicker:<label>`），于是：
+> **同一个用户的任务严格串行（不撞锁），不同用户之间并行（不用排队）**。
+> `API_KEYS` 增删后，监督器会在几秒内自动增减 worker，无需重启网关。
 
 - `--concurrency=1` **必须显式写**，这是"同一时刻只有一个 myflicker 进程"的唯一保证。
 - 不要加 `--prefetch-multiplier` 其它值，不要在同一个 Redis 上再起第二个 worker；
@@ -398,7 +402,7 @@ Harness 侧的硬性约定：
 | `error="executable not found"` | `MYFLICKER_BIN` 路径错或不可执行（`chmod +x`） |
 | `error="cwd not found"` | `MYFLICKER_CWD` 或请求里的 `cwd` 不存在 |
 | `status=failure, returncode=-9` | 命中超时，进程组被 SIGKILL；调大 `timeout` 或 `DEFAULT_TIMEOUT` |
-| 任务并发时快时慢 | 队列在串行排队（正常）；不要为了提速加 `--concurrency>1`，会触发 myflicker 锁冲突 |
+| 同一用户任务变慢 | 该用户自己的队列在串行（正常）；不要给单个 worker 加 `--concurrency>1`，同目录并发会撞 myflicker 锁 |
 | `result` 返回 404 | 超过 `RESULT_TTL` 已过期，或 task_id 拼错 |
 
 ## 10. 自检清单
@@ -412,7 +416,8 @@ Harness 侧的硬性约定：
 - [ ] 立刻查询该 task 得到 `pending` 或 `running`，轮询后变为 `success`
 - [ ] `success` 响应里包含 `returncode`、`stdout`、`stderr`、`cmd`
 - [ ] 故意提交 `{"args":["--nope"]}` 或让命令 sleep 超时，得到 `status=failure` 且 `timed_out=true`
-- [ ] 连续提交 3 个任务，worker 日志显示它们的执行区间**互不重叠**（串行）
+- [ ] 连续提交 3 个任务（同一个 key），执行区间**互不重叠**（用户内串行）
+- [ ] 两个 key 同时各提交一个任务，两个 worker **同时执行**（用户间并行）
 - [ ] `logs/myflicker_tasks.jsonl` 生成，且每个 task_id 有 `task.submitted → task.started → process.started → process.stdout → task.finished`
 - [ ] `logs/tasks/<task_id>.jsonl`、`<task_id>.stdout.txt`、`<task_id>.stderr.txt` 均生成且非空
 - [ ] `python test_client.py list --verbose` 退出码 0，并打印完整 stdout

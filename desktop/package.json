@@ -53,6 +53,18 @@
         "to": "backend/main.py"
       },
       {
+        "from": "../worker_supervisor.py",
+        "to": "backend/worker_supervisor.py"
+      },
+      {
+        "from": "../openai_api.py",
+        "to": "backend/openai_api.py"
+      },
+      {
+        "from": "../identity.py",
+        "to": "backend/identity.py"
+      },
+      {
         "from": "../celery_tasks.py",
         "to": "backend/celery_tasks.py"
       },
