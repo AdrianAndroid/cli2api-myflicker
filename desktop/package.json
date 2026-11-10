@@ -1,0 +1,86 @@
+{
+  "name": "myflicker-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local control panel for the myflicker HTTP gateway",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build": "vite build",
+    "start": "electron .",
+    "dev": "vite build && electron .",
+    "typecheck": "tsc --noEmit",
+    "dist:mac": "vite build && electron-builder --mac",
+    "dist:win": "vite build && electron-builder --win",
+    "dist:linux": "vite build && electron-builder --linux"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "local.myflicker.desktop",
+    "productName": "myflicker",
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "extraResources": [
+      {
+        "from": "../main.py",
+        "to": "backend/main.py"
+      },
+      {
+        "from": "../celery_tasks.py",
+        "to": "backend/celery_tasks.py"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "backend/requirements.txt"
+      },
+      {
+        "from": "../.env.example",
+        "to": "backend/.env.example"
+      },
+      {
+        "from": "../mock_myflicker.sh",
+        "to": "backend/mock_myflicker.sh"
+      },
+      {
+        "from": "../test_client.py",
+        "to": "backend/test_client.py"
+      },
+      {
+        "from": "../README_START.md",
+        "to": "backend/README_START.md"
+      }
+    ]
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.25.12": true
+  },
+  "author": "myflicker"
+}

@@ -416,3 +416,243 @@ Harness 侧的硬性约定：
 - [ ] `logs/myflicker_tasks.jsonl` 生成，且每个 task_id 有 `task.submitted → task.started → process.started → process.stdout → task.finished`
 - [ ] `logs/tasks/<task_id>.jsonl`、`<task_id>.stdout.txt`、`<task_id>.stderr.txt` 均生成且非空
 - [ ] `python test_client.py list --verbose` 退出码 0，并打印完整 stdout
+
+## 11. 局域网提供服务（LAN 模式）
+
+`.env` 里把 `API_HOST` 设为 `0.0.0.0`（桌面端的「局域网」页可一键切换），服务即可被同网段机器访问。
+
+```
+LAN 客户端 ──HTTP + X-API-Key──►  http://<你的 IP>:8000   （或 http://<host>.local:8000）
+                                         │
+                                  网关做三重校验：来源 CIDR → API Key → 限流 → 队列背压
+```
+
+| 控制项 | `.env` key | 行为 |
+| --- | --- | --- |
+| 来源白名单 | `ALLOWED_CIDRS` | 非回环 IP 不在网段内 → `403 ip_not_allowed`；回环永远放行 |
+| 鉴权 | `API_KEY` / `ADMIN_API_KEY` | task key 用于 submit/result/cancel；admin key 用于 `GET /tasks`（未设置时复用 task key） |
+| 限流 | `RATE_LIMIT_PER_MIN` | 固定窗口，按 `key+IP` 计数，超限 `429` + `Retry-After` |
+| 背压 | `MAX_QUEUE_DEPTH` | 串行队列已排队数 ≥ 上限 → `429 queue_full`（附 `queue_depth`），避免远端把队列堆爆 |
+| 子命令白名单 | `ALLOWED_ARGS_REGEX` | 拼接后的 args 不匹配正则 → `400 arg_not_allowed` |
+
+新增/扩展接口：
+
+```bash
+# 队列快照（需要 admin key）
+curl -s "http://<IP>:8000/api/myflicker/tasks?limit=20" -H "X-API-Key: $ADMIN_KEY"
+
+# 取消「还在排队」的任务（running 会返回 409，避免强杀 myflicker）
+curl -s -X POST "http://<IP>:8000/api/myflicker/tasks/<task_id>/cancel" -H "X-API-Key: $API_KEY"
+
+# /health 现在额外返回 bind / lan_enabled / lan_urls / queue_depth / security
+curl -s "http://<IP>:8000/api/myflicker/health" -H "X-API-Key: $API_KEY" | python3 -m json.tool
+```
+
+注意事项：
+
+1. 网关只暴露 `submit` / `result` / `tasks` / `cancel` / `health`，**进程启停永远只在桌面端**。
+2. macOS 需要在「系统设置 › 网络 › 防火墙」放行 python/uvicorn 的入站连接。
+3. 只想本机用就把 `API_HOST` 改回 `127.0.0.1`，桌面端「局域网」页有开关。
+4. `http://<host>.local:8000` 依赖 Bonjour/mDNS，IP 变化后仍可用。
+5. 不要在公共 Wi-Fi 上把端口对公网暴露；确需如此请前置 TLS（`TLS_CERT`/`TLS_KEY` 或 Caddy）。
+
+## 12. 桌面端控制台（desktop/）
+
+Electron + React 写的本地控制台，负责**启停服务**和**调试任务**，本身不执行 myflicker。
+
+```bash
+cd desktop
+npm install          # 首次
+npm run build        # 构建渲染层（vite → desktop/dist）
+npm start            # 启动桌面应用
+```
+
+`npm start` 打开窗口后：
+
+| 页面 | 能做什么 |
+| --- | --- |
+| 任务 | 提交任务（args 逐项、timeout、cwd、env），列表实时刷新，查看 stdout/stderr/事件链，取消排队任务 |
+| 聊天 | 用自然语言行（其实是 myflicker 参数）连续测试，`/timeout`、`/cwd`、`/env K=V` 会话级指令 |
+| 日志 | worker/api/redis 实时输出，关键字过滤、暂停、打开日志文件 |
+| 局域网 | 本机/LAN 切换、展示调用地址（IP 与 `.local`）、Key 掩码与轮换、安全策略、curl 示例 |
+| 设置 | `.env` 结构化编辑（文件/目录选择器）、保存后提示重启 |
+
+启动顺序由主进程状态机控制：`Redis → FastAPI → Worker(--concurrency=1) → /health 自检`；
+停止顺序反向，Worker 给 10s 优雅退出，超时对**整个进程组** SIGKILL。
+已经手动起了服务时会自动「复用」而不是重复拉起（避免双 worker 破坏串行）。
+
+调试与打包：
+
+```bash
+npm run typecheck    # 渲染层类型检查
+npm run dist:mac     # dmg（未签名，仅本机自用）
+npm run dist:win     # nsis
+npm run dist:linux   # AppImage
+```
+
+截图自检（无头验证 UI 是否正常渲染）：
+
+```bash
+MYFLICKER_DESKTOP_AUTOSTART=1 \
+MYFLICKER_DESKTOP_CAPTURE=/tmp/ui.png \
+MYFLICKER_DESKTOP_CAPTURE_DELAY_MS=12000 \
+MYFLICKER_DESKTOP_SMOKE=1 npm start
+```
+
+桌面端日志：`logs/desktop/{worker,api,redis}.log`（环形缓冲 3000 行 + 文件追加）。
+
+### 12.1 打包产物里到底有什么
+
+`npm run dist:mac`（或 `electron-builder --mac --dir`）产出的 `.app` 里：
+
+| 位置 | 内容 |
+| --- | --- |
+| `Contents/Resources/app.asar` | 渲染层 `dist/` + Electron 主进程代码（`electron/*.cjs`）+ React 依赖 |
+| `Contents/Resources/backend/` | **Python 后端源码**：`main.py`、`celery_tasks.py`、`requirements.txt`、`.env.example`、`mock_myflicker.sh`、`test_client.py`、`README_START.md` |
+| 用户数据目录（不在包内） | `.env`、`.venv`、`logs/`、`workspace/`，首次运行时自动生成 |
+
+用户数据目录：
+
+| 平台 | 路径 |
+| --- | --- |
+| macOS | `~/Library/Application Support/myflicker-desktop/` |
+| Windows | `%APPDATA%\myflicker-desktop\` |
+| Linux | `~/.config/myflicker-desktop/` |
+
+首次启动做了什么：
+
+1. 把包内 `.env.example` 复制成用户数据目录下的可写 `.env`（权限 600），并写入随机 `API_KEY`、`LOG_DIR`、`MYFLICKER_CWD`（`…/workspace`）、`REDIS_BIN`（自动探测 brew 路径）。
+2. 检测 Python 运行环境：没有 `.venv` 或缺依赖时，顶部出现黄色横幅 **「运行环境未就绪」**，点 **初始化运行环境** 即在数据目录建 venv 并 `pip install -r requirements.txt`，进度实时打到 `setup.log`。
+3. 就绪后再点「启动服务」，状态机才去拉 Redis / FastAPI / Worker。
+
+命令行等价操作（CI / 排查用）：
+
+```bash
+# 只打 app 目录，不生成 dmg（最快验证打包内容）
+cd desktop && npx electron-builder --mac --dir
+ls release/mac-arm64/myflicker.app/Contents/Resources/backend/
+
+# 无头跑一遍：初始化 + 启动 + 截图
+MYFLICKER_DESKTOP_INIT=1 MYFLICKER_DESKTOP_AUTOSTART=1 \
+MYFLICKER_DESKTOP_CAPTURE=/tmp/ui.png MYFLICKER_DESKTOP_CAPTURE_DELAY_MS=15000 \
+MYFLICKER_DESKTOP_SMOKE=1 \
+./release/mac-arm64/myflicker.app/Contents/MacOS/myflicker
+```
+
+需要注意：
+
+- 包里 **不含** Python 解释器、`.venv`、`redis-server`：分别依赖本机 `python3`（≥3.9）和系统 Redis（或 `.env` 里的 `REDIS_BIN`）。
+- 开发模式与打包模式的路径：开发用仓库根目录的 `.env`；打包后读用户数据目录的 `.env`。想强制指定后端源码目录，设 `MYFLICKER_PROJECT_ROOT=/path/to/repo`。
+- 想让一次运行使用独立的数据目录（`.env`/`.venv`/`logs`/单实例锁全隔离，做测试或并行演示时用），设 `MYFLICKER_DESKTOP_DATA_DIR=/tmp/mf-test-data`。
+- 截图自检默认是**无头**的（窗口 `show:false` + 不抢焦点 + Dock 隐藏），不会打断正在使用电脑的人；具体纪律见 `AGENTS.md`。
+- 未做代码签名/公证：`.app` 在本机可运行，分发给别人会被 Gatekeeper 拦；需要你的 Apple Developer 证书。
+- `MYFLICKER_BIN` 在打包后默认是 `.env.example` 里的值，**必须**在设置页改成真实 myflicker 路径（或用 `mock_myflicker.sh` 自测）。
+
+## 13. OpenAI 兼容接口（/v1）
+
+同一进程额外挂了一套 OpenAI Chat Completions 协议，任何 OpenAI SDK / Agent 框架把 `base_url` 指过来即可。
+
+```bash
+BASE=http://127.0.0.1:8000
+curl -s $BASE/v1/models -H "Authorization: Bearer $API_KEY"
+
+curl -s -X POST $BASE/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"myflicker-agent","messages":[{"role":"user","content":"列出当前目录结构"}],"timeout":180}'
+
+# 流式（SSE，增量来自 myflicker 的 stdout）
+curl -sN -X POST $BASE/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"myflicker-agent","stream":true,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Python（官方 openai SDK，无需改代码逻辑）：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="<API_KEY>")
+resp = client.chat.completions.create(
+    model="myflicker-agent",
+    messages=[{"role": "user", "content": "列出当前目录结构"}],
+    timeout=180,
+)
+print(resp.choices[0].message.content)
+```
+
+映射规则（很关键）：
+
+| OpenAI 字段 | 映射到 myflicker |
+| --- | --- |
+| `messages[]` | 拼成一个 prompt（单条消息原样；多条消息按 `role: content` 连接） |
+| 默认参数 | `-q`（非交互）。带上 `-c` 需要自己传 `myflicker_args: ["-q","-c"]` |
+| `myflicker_args`（扩展字段） | 覆盖默认参数，例如 `["-q","--model","doubao-seed"]` |
+| `cwd` / `env`（扩展字段） | 工作目录与额外环境变量 |
+| `timeout` | 单次任务超时（秒），上限 `MAX_TIMEOUT` |
+| `stream: true` | SSE 增量，chunk 来自 worker 实时推送的 stdout |
+| `model` | 仅作标识，透传到响应；不参与路由 |
+
+实现要点：
+
+- 每个请求 = 一条 Celery 任务（`myflicker.run`），仍然只有一个 `--concurrency=1` 的 worker，**不会并发拉起 myflicker**。
+- 响应体是标准 `chat.completion`（`id/object/created/model/choices/usage`），额外附一个 `x_myflicker` 字段：`task_id / status / returncode / duration_ms / cmdline / stderr`，方便排障；OpenAI SDK 会忽略它。
+- `usage` 是**估算值**（按字符数 /4 粗算），myflicker 不返回真实 token 数。
+- 失败时 `finish_reason` 为 `error`，内容里带 `[myflicker failed: …]` 与 stderr，HTTP 仍返回 200（符合 OpenAI 客户端预期）；请求本身不合法才返回 4xx，鉴权失败返回 401 且是 OpenAI 错误结构。
+
+不支持的（明确说清楚，避免误判）：`tools/function calling`、`response_format`、图片/音频多模态输入、`logprobs`、`n>1`、`temperature` 等采样参数（CLI 不接受这些概念，传了也不生效）。
+
+## 14. 多人共享 / 局域网：上下文如何隔离
+
+结论先说：**myflicker 的会话是按「工作目录」归属的**（`~/.myflicker/projects/<cwd 编码>/`），
+`-c/--continue` 只续当前目录最近一次会话。所以只要给每个调用方一个独立目录，对话上下文就天然隔离。
+
+实测（同一台机器）：
+
+```
+/tmp/iso-a: myflicker -q "记住 42"                 → OK
+/tmp/iso-a: myflicker -q -c "我刚才让你记的数字"     → 42        （续到自己的会话）
+/tmp/iso-b: myflicker -q -c "我刚才让你记的数字"     → 这是本对话的第一条消息…   （看不到 a 的上下文）
+```
+
+配置：
+
+```ini
+# .env
+API_KEYS=alice:<key-a>,bob:<key-b>     # 每个 label 一个 key
+WORKSPACE_ROOT=/Users/zhaojian/Library/Application Support/myflicker-desktop/workspace
+SANDBOX_ENFORCE=1                      # 非回环调用方只能用自己的 workspace
+```
+
+行为：
+
+| 维度 | 结果 |
+| --- | --- |
+| 会话/上下文 | **隔离**：`<WORKSPACE_ROOT>/<label>/` 各自一份，`-c` 只续自己的 |
+| 文件 | **隔离**：默认 cwd 就是自己的 workspace；局域网调用方越界（`/etc`、别人的目录）→ `403 cwd_outside_workspace` |
+| 任务可见性 | **隔离**：任务记 `owner`，别人的 task_id 查出来是 `404`（不泄露存在性）；`/tasks` 只列自己的 |
+| 模型额度/登录态 | **共享**：同一个 `~/.myflicker` 凭证，费用算你的（这是你接受的部分） |
+| skills / rules / MCP | 共享（同一份配置） |
+| 并发 | 共享一个 `--concurrency=1` worker，任务排队 |
+
+注意：
+
+- 换 `HOME` 并不能做更彻底的隔离：myflicker 的登录态不在 `~/.myflicker` 里，换 HOME 会直接
+  `Authentication required`。所以「共享额度 + 隔离上下文」就用上面的 workspace 方案。
+- 首次访问某个 label 时后端会自动创建 `<WORKSPACE_ROOT>/<label>/uploads/`。
+- 本机（127.0.0.1）默认不受沙箱限制，方便你用桌面端在任意仓库里跑；要连本机也限制，设
+  `SANDBOX_ENFORCE_LOOPBACK=1`。
+
+给同事发什么：
+
+```bash
+# 让对方执行
+export BASE=http://172.24.121.94:8000
+export KEY=<alice 对应的 key>
+
+curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"myflicker-agent","messages":[{"role":"user","content":"看一下你工作区里的文件"}]}'
+```
+
+对方看到的永远是自己的 workspace，看不到你的、也看不到其他人的对话。
+

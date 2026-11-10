@@ -18,6 +18,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +107,44 @@ else:
     logger.warning("EXTRA_ENV must be a JSON object, ignored")
 
 
+def task_stream_key(task_id: str) -> str:
+    return f"{task_key(task_id)}:stream"
+
+
+def publish_stream(task_id: str, stream: str, text: str) -> None:
+    """Append one live stdout/stderr chunk for SSE consumers (best effort)."""
+    if not text:
+        return
+    try:
+        client = get_redis()
+        key = task_stream_key(task_id)
+        client.rpush(key, json.dumps({"stream": stream, "text": text}, ensure_ascii=False))
+        client.expire(key, RESULT_TTL)
+    except Exception:  # noqa: BLE001 - streaming is an enhancement, never fatal
+        pass
+
+
+def mark_stream_end(task_id: str, status: str) -> None:
+    try:
+        client = get_redis()
+        key = task_stream_key(task_id)
+        client.rpush(key, json.dumps({"stream": "__end__", "status": status}))
+        client.expire(key, RESULT_TTL)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def read_stream(task_id: str, index: int) -> tuple[List[Dict[str, Any]], int]:
+    """Read chunks from `index` onward; returns (chunks, next_index)."""
+    try:
+        client = get_redis()
+        raw = client.lrange(task_stream_key(task_id), index, -1)
+        chunks = [json.loads(item) for item in raw]
+        return chunks, index + len(chunks)
+    except Exception:  # noqa: BLE001
+        return [], index
+
+
 def ensure_log_dirs() -> None:
     TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -135,6 +174,36 @@ def get_redis() -> redis.Redis:
 
 def task_key(task_id: str) -> str:
     return f"{TASK_KEY_PREFIX}:{task_id}"
+
+
+_broker_client: Optional[redis.Redis] = None
+
+
+def get_broker_redis() -> redis.Redis:
+    """Client for the broker DB (task queue lives there, not in REDIS_URL)."""
+    global _broker_client
+    if _broker_client is None:
+        _broker_client = redis.Redis.from_url(
+            CELERY_BROKER_URL,
+            decode_responses=True,
+            socket_timeout=2,
+            socket_connect_timeout=2,
+        )
+    return _broker_client
+
+
+def broker_queue_depth(queue: str = CELERY_QUEUE) -> Optional[int]:
+    """Queued + reserved (prefetched) task count, best effort."""
+    try:
+        client = get_broker_redis()
+        queued = int(client.llen(queue))
+        try:
+            reserved = int(client.hlen("unacked") or 0)
+        except Exception:  # noqa: BLE001 - hash may not exist yet
+            reserved = 0
+        return queued + reserved
+    except Exception:  # noqa: BLE001 - broker down, depth unknown
+        return None
 
 
 def load_task_state(task_id: str) -> Optional[Dict[str, Any]]:
@@ -276,6 +345,7 @@ def build_child_env(task_id: str, env_extra: Optional[Dict[str, Any]]) -> Dict[s
         for key, value in env_extra.items():
             env[str(key)] = str(value)
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     env.setdefault("MYFLICKER_TASK_ID", task_id)
     return env
 
@@ -400,17 +470,31 @@ def run_myflicker(
             log_event(task_id, "process.started", pid=pid, command=command, cwd=run_cwd)
 
             clock = time.monotonic()
+            out_chunks: List[str] = []
+            err_chunks: List[str] = []
+
+            def pump(pipe, chunks: List[str], stream_name: str) -> None:
+                try:
+                    for line in iter(pipe.readline, ""):
+                        chunks.append(line)
+                        publish_stream(task_id, stream_name, line)
+                finally:
+                    try:
+                        pipe.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            readers = [
+                threading.Thread(target=pump, args=(proc.stdout, out_chunks, "stdout"), daemon=True),
+                threading.Thread(target=pump, args=(proc.stderr, err_chunks, "stderr"), daemon=True),
+            ]
+            for reader in readers:
+                reader.start()
+
             try:
-                stdout, stderr = proc.communicate(timeout=timeout_sec)
-                timed_out = False
-            except subprocess.TimeoutExpired as exc:
+                proc.wait(timeout=timeout_sec)
+            except subprocess.TimeoutExpired:
                 timed_out = True
-                stdout = exc.stdout or ""
-                stderr = exc.stderr or ""
-                if isinstance(stdout, bytes):
-                    stdout = stdout.decode("utf-8", "replace")
-                if isinstance(stderr, bytes):
-                    stderr = stderr.decode("utf-8", "replace")
                 log_event(
                     task_id,
                     "process.timeout",
@@ -421,16 +505,19 @@ def run_myflicker(
                 )
                 terminate_process(proc)
                 try:
-                    tail_out, tail_err = proc.communicate(timeout=10)
-                    stdout = (stdout or "") + (tail_out or "")
-                    stderr = (stderr or "") + (tail_err or "")
+                    proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    stderr = (stderr or "") + "\n[gateway] process did not die after SIGKILL"
+                    err_chunks.append("\n[gateway] process did not die after SIGKILL\n")
             except Exception as exc:  # noqa: BLE001 - never let a task die silently
                 error = f"unexpected subprocess error: {exc}"
                 log_event(task_id, "process.error", level="ERROR", pid=pid, error=error)
                 terminate_process(proc)
 
+            for reader in readers:
+                reader.join(timeout=3)
+
+            stdout = "".join(out_chunks)
+            stderr = "".join(err_chunks)
             returncode = proc.returncode
             duration_ms = int((time.monotonic() - clock) * 1000)
 
@@ -466,6 +553,8 @@ def run_myflicker(
     else:
         status = "failure"
         error = error or f"myflicker exited with returncode {returncode}"
+
+    mark_stream_end(task_id, status)
 
     result: Dict[str, Any] = {
         "task_id": task_id,

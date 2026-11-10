@@ -5,3 +5,8 @@ logs/
 *.pyc
 .DS_Store
 .myflicker/
+desktop/node_modules/
+desktop/dist/
+desktop/release/
+desktop/.vite/
+workspace/
