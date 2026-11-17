@@ -35,20 +35,27 @@
 - **WHEN** 进入新的一天（或新的一周）
 - **THEN** 该窗口计数从 0 重新开始
 
-### Requirement: Usage Visibility
+### Requirement: Usage Stats And Leaderboard
 
-`GET /api/myflicker/usage` SHALL 返回调用方自己的用量；带 admin key 时 MUST 支持查询任意 label。
+`GET /api/myflicker/stats?window=day|week` SHALL 返回调用方自己的用量；带 admin key 时 MUST 返回全部 label 的按 key 排行。
 
 #### Scenario: 普通身份查询
 
-- **WHEN** alice 请求 `/api/myflicker/usage?window=day`
-- **THEN** 只返回 alice 的计数与最近明细
+- **WHEN** alice 请求 `/api/myflicker/stats?window=day`
+- **THEN** 只返回 alice 的计数、限额与最近明细
 - **AND** 响应中不含其他 label 的数据
 
-#### Scenario: admin 查询
+#### Scenario: admin 排行
 
-- **WHEN** admin key 请求 `/api/myflicker/usage?label=bob&window=week`
-- **THEN** 返回 bob 的周用量与明细
+- **WHEN** admin key 请求 `/api/myflicker/stats?window=week`
+- **THEN** 返回总计与全部 label 的行
+- **AND** 行按窗口内请求数降序
+
+#### Scenario: 窗口切换
+
+- **WHEN** 请求从 `window=day` 改为 `window=week`
+- **THEN** 计数与重置时间切换到周窗口
+- **AND** 最近明细不重复计数
 
 ### Requirement: Quota Is Independent Of Lanes
 

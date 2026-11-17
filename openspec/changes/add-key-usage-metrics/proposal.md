@@ -16,16 +16,22 @@
 
 新增配置 `KEY_LIMITS=alice:50/day,bob:200/week`。提交时先校验该 label 在当前窗口的已用量，超出后返回 429 `quota_exceeded`，并带上窗口、已用量、上限与重置时间。
 
-### 3. 用量查询接口
+### 3. 统计与排行接口
 
-新增 `GET /api/myflicker/usage?window=day|week`：
+新增 `GET /api/myflicker/stats?window=day|week`：
 
-- 普通 key：只能看到自己的用量；
-- admin key：可加 `?label=` 查看任意 label。
+- 普通 key：只返回自己一行（用量、限额、重置时间、最近明细）；
+- admin key：返回总计与**按 key 排行**（请求数、成功率、平均耗时、估算 token、配额）；
+- 排行按当前窗口的请求数降序，限额与重置时间随行返回。
 
 ### 4. 桌面端展示
 
-控制台新增"用量"视图：当前身份的日/周已用、上限、最近任务明细；admin 可以看到全部 label 的汇总。
+「服务」页新增用量卡片，按 key 排行：
+
+- 顶部 KPI：总请求、在线 key、估算 token、超限 key 数；
+- 表格：label / 请求 / 成功率 / 平均耗时 / token / 配额进度；
+- 日 / 周切换；普通用户只看自己，admin 看全部；
+- 点击某一行跳转任务列表并按该 label 过滤。
 
 ## Capabilities
 
@@ -39,7 +45,7 @@
 
 ## Impact
 
-- 代码：`celery_tasks.py`（记录用量）、`identity.py`（解析 `KEY_LIMITS`）、`main.py`（限额校验 + `/usage`）、`desktop/src/views/*`（用量视图）。
+- 代码：`celery_tasks.py`（记录用量）、`identity.py`（解析 `KEY_LIMITS`）、`main.py`（限额校验 + `/stats`）、`desktop/src/views/OverviewPage.tsx`（排行卡片）。
 - 配置：`.env` 新增 `KEY_LIMITS`。
 - 兼容性：未配置 `KEY_LIMITS` 的行为保持不变（不限额）。
 
