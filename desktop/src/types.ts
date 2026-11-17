@@ -106,6 +106,16 @@ export interface ChangeDiff {
   error?: string;
 }
 
+export interface BrowserState {
+  ready?: boolean;
+  url?: string;
+  title?: string;
+  loading?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  error?: string | null;
+}
+
 export interface ProbeResult {
   ok: boolean;
   stage?: string;
@@ -204,6 +214,14 @@ export interface Bridge {
   listWorkspaces(path?: string): Promise<WorkspaceListing>;
   listChanges(path?: string): Promise<ChangesListing>;
   changeDiff(path: string | undefined, file: string): Promise<ChangeDiff>;
+  browserShow(payload: { bounds: { x: number; y: number; width: number; height: number }; url?: string }): Promise<BrowserState>;
+  browserHide(): Promise<{ ok: boolean }>;
+  browserSetBounds(rect: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean }>;
+  browserNavigate(url: string): Promise<{ ok: boolean; url?: string; error?: string }>;
+  browserBack(): Promise<BrowserState>;
+  browserForward(): Promise<BrowserState>;
+  browserReload(): Promise<BrowserState>;
+  onBrowserEvent(callback: (state: BrowserState) => void): () => void;
 
   chatStart(payload: { requestId: string; body: Record<string, unknown> }): Promise<{ ok: boolean; requestId?: string; error?: string }>;
   chatAbort(requestId: string): Promise<{ ok: boolean }>;

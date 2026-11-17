@@ -406,6 +406,43 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .right-panel-head { padding: 14px 14px 8px; }
 .panel-empty { padding: 10px 14px; }
 .panel-error { margin: 10px 12px; }
+.panel-tabs { display: flex; gap: 6px; padding: 0 14px 8px; }
+.panel-tab {
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 9px;
+  border-radius: 8px;
+}
+.panel-tab:hover { background: #f4f5f9; color: var(--text); }
+.panel-tab.active { background: #eef4ff; color: var(--blue); }
+
+.browser-toolbar { display: flex; align-items: center; gap: 6px; padding: 0 12px 6px; }
+.nav-btn {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+.nav-btn:hover:not(:disabled) { background: #f4f5f9; color: var(--text); }
+.nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.browser-address { flex: 1; min-width: 0; padding: 5px 8px; font-size: 11.5px; }
+.browser-status { padding: 0 14px 6px; min-height: 18px; }
+.browser-host {
+  flex: 1;
+  min-height: 0;
+  margin: 0 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
 .change-list {
   max-height: 38%;
   overflow-y: auto;

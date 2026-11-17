@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -203,6 +203,113 @@ function ensureClientProbe() {
   clientProbeTimer = setInterval(() => void probeClient(), 3000);
 }
 
+// ---------------------------------------------------------------- browser ---
+// The right panel embeds a real Chromium view; the renderer only reports the
+// rectangle it should cover, never HTML. New windows are denied and user input
+// is limited to http(s).
+const BROWSER_HOME = `data:text/html;charset=utf-8,${encodeURIComponent(
+  '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font:14px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#8a8f98;background:#fff}</style></head><body>输入地址开始浏览</body></html>',
+)}`;
+let browserView = null;
+
+function normalizeBounds(rect) {
+  const num = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.round(parsed) : 0;
+  };
+  return {
+    x: Math.max(0, num(rect && rect.x)),
+    y: Math.max(0, num(rect && rect.y)),
+    width: Math.max(0, num(rect && rect.width)),
+    height: Math.max(0, num(rect && rect.height)),
+  };
+}
+
+function browserState() {
+  if (!browserView || browserView.webContents.isDestroyed()) {
+    return { ready: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false };
+  }
+  const wc = browserView.webContents;
+  const history = wc.navigationHistory;
+  return {
+    ready: true,
+    url: wc.getURL(),
+    title: wc.getTitle(),
+    loading: wc.isLoading(),
+    canGoBack: Boolean(history && history.canGoBack && history.canGoBack()),
+    canGoForward: Boolean(history && history.canGoForward && history.canGoForward()),
+  };
+}
+
+function browserSend(partial = {}) {
+  if (win && !win.isDestroyed()) win.webContents.send("browser:event", { ...browserState(), ...partial });
+}
+
+function ensureBrowserView() {
+  if (browserView && !browserView.webContents.isDestroyed()) return browserView;
+  browserView = new WebContentsView({
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  browserView.setBackgroundColor("#ffffff");
+  const wc = browserView.webContents;
+  wc.setWindowOpenHandler(() => ({ action: "deny" }));
+  wc.on("did-start-loading", () => browserSend({ loading: true, error: null }));
+  wc.on("did-stop-loading", () => browserSend({ loading: false }));
+  wc.on("did-navigate", (_event, url) => browserSend({ url, error: null }));
+  wc.on("did-navigate-in-page", (_event, url) => browserSend({ url }));
+  wc.on("page-title-updated", (_event, title) => browserSend({ title }));
+  wc.on("did-fail-load", (_event, code, description, url, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    browserSend({ error: `${description} (${code})`, url });
+  });
+  if (HEADLESS) wc.once("did-finish-load", () => console.log("[desktop] browser view loaded"));
+  win.contentView.addChildView(browserView);
+  browserView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  wc.loadURL(BROWSER_HOME).catch(() => null);
+  return browserView;
+}
+
+function browserUrl(input) {
+  let raw = String(input || "").trim();
+  if (!raw) return null;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) raw = `https://${raw}`;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function browserNavigate(input) {
+  const url = browserUrl(input);
+  if (!url) return { ok: false, error: "仅支持 http(s) 地址" };
+  const view = ensureBrowserView();
+  view.webContents.loadURL(url).catch(() => null);
+  return { ok: true, url };
+}
+
+function browserGo(direction) {
+  if (!browserView || browserView.webContents.isDestroyed()) return browserState();
+  const history = browserView.webContents.navigationHistory;
+  if (!history) return browserState();
+  if (direction === "back" && history.canGoBack()) history.goBack();
+  if (direction === "forward" && history.canGoForward()) history.goForward();
+  return browserState();
+}
+
+function browserHide() {
+  if (browserView && !browserView.webContents.isDestroyed()) {
+    browserView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  }
+}
+
 /** Headless mode: capture runs must never steal focus from the user. */
 const HEADLESS = Boolean(process.env.MYFLICKER_DESKTOP_CAPTURE);
 
@@ -232,6 +339,7 @@ function createWindow() {
       prompt: process.env.MYFLICKER_DESKTOP_CHAT_PROMPT || "",
       project: process.env.MYFLICKER_DESKTOP_PROJECT || "",
       panel: process.env.MYFLICKER_DESKTOP_PANEL || "",
+      browser: process.env.MYFLICKER_DESKTOP_BROWSER || "",
     },
   });
 
@@ -242,6 +350,8 @@ function createWindow() {
   });
 
   win.on("closed", () => {
+    if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.close();
+    browserView = null;
     win = null;
   });
 }
@@ -456,6 +566,32 @@ ipcMain.handle("profiles:probe", async (_event, input) => {
   } catch (error) {
     return { ok: false, stage: "network", error: `${error.name}: ${error.message}` };
   }
+});
+
+ipcMain.handle("browser:show", async (_event, payload) => {
+  const view = ensureBrowserView();
+  if (payload && payload.bounds) {
+    const bounds = normalizeBounds(payload.bounds);
+    view.setBounds(bounds);
+    if (HEADLESS) console.log(`[desktop] browser bounds ${bounds.width}x${bounds.height}+${bounds.x}+${bounds.y}`);
+  }
+  if (payload && payload.url) browserNavigate(payload.url);
+  return browserState();
+});
+ipcMain.handle("browser:hide", () => {
+  browserHide();
+  return { ok: true };
+});
+ipcMain.handle("browser:bounds", (_event, rect) => {
+  if (browserView && !browserView.webContents.isDestroyed()) browserView.setBounds(normalizeBounds(rect));
+  return { ok: true };
+});
+ipcMain.handle("browser:navigate", (_event, url) => browserNavigate(url));
+ipcMain.handle("browser:back", () => browserGo("back"));
+ipcMain.handle("browser:forward", () => browserGo("forward"));
+ipcMain.handle("browser:reload", () => {
+  if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.reload();
+  return browserState();
 });
 
 ipcMain.handle("app:role", async (_event, role) => {

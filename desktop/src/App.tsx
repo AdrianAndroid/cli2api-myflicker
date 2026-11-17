@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ServiceStatus } from "./types";
 import TasksPage from "./views/TasksPage";
 import ChatPage from "./views/ChatPage";
@@ -93,7 +93,13 @@ export default function App() {
   }, [role, profileKind]);
 
   // switching between local and remote profiles lands on that role's home screen
+  // (skipped on the first render so `?tab=` deep links survive)
+  const firstVisibility = useRef(true);
   useEffect(() => {
+    if (firstVisibility.current) {
+      firstVisibility.current = false;
+      return;
+    }
     setTab(serviceVisible ? "overview" : "chat");
   }, [serviceVisible]);
 

@@ -42,6 +42,19 @@ contextBridge.exposeInMainWorld("api", {
   listChanges: (path) => ipcRenderer.invoke("changes:list", path),
   changeDiff: (path, file) => ipcRenderer.invoke("changes:diff", path, file),
 
+  browserShow: (payload) => ipcRenderer.invoke("browser:show", payload),
+  browserHide: () => ipcRenderer.invoke("browser:hide"),
+  browserSetBounds: (rect) => ipcRenderer.invoke("browser:bounds", rect),
+  browserNavigate: (url) => ipcRenderer.invoke("browser:navigate", url),
+  browserBack: () => ipcRenderer.invoke("browser:back"),
+  browserForward: () => ipcRenderer.invoke("browser:forward"),
+  browserReload: () => ipcRenderer.invoke("browser:reload"),
+  onBrowserEvent: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on("browser:event", handler);
+    return () => ipcRenderer.removeListener("browser:event", handler);
+  },
+
   getRole: () => ipcRenderer.invoke("app:role"),
   setRole: (role) => ipcRenderer.invoke("app:role", role),
   listProfiles: () => ipcRenderer.invoke("profiles:list"),
