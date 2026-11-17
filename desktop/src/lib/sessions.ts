@@ -19,6 +19,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   sessionId?: string;
+  cwd?: string;
   messages: ChatMsg[];
 }
 
@@ -40,9 +41,9 @@ const MAX_BYTES = 1_500_000;
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
-export function createSession(title = "新对话", messages: ChatMsg[] = []): Session {
+export function createSession(title = "新对话", messages: ChatMsg[] = [], cwd?: string): Session {
   const now = new Date().toISOString();
-  return { id: uid(), title, createdAt: now, updatedAt: now, messages };
+  return { id: uid(), title, createdAt: now, updatedAt: now, cwd, messages };
 }
 
 export function titleFrom(text: string): string {
@@ -112,6 +113,7 @@ function normalizeSession(value: unknown): Session | null {
     createdAt,
     updatedAt,
     sessionId: typeof raw.sessionId === "string" ? raw.sessionId : undefined,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : undefined,
     messages,
   };
 }
@@ -154,6 +156,12 @@ export function loadStore(profileId: string): SessionStore {
 
   const fresh = createSession();
   return { activeId: fresh.id, sessions: [fresh] };
+}
+
+export function projectLabel(cwd?: string): string {
+  if (!cwd) return "默认目录";
+  const parts = cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "默认目录";
 }
 
 export function persistStore(profileId: string, store: SessionStore): void {

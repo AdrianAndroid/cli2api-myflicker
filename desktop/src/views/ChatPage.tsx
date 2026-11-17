@@ -6,20 +6,23 @@ import {
   groupSessions,
   loadStore,
   persistStore,
+  projectLabel,
   relativeTime,
   stepsOf,
   titleFrom,
   uid,
 } from "../lib/sessions";
+import ProjectPicker from "./ProjectPicker";
 
 interface Props {
   status: ServiceStatus | null;
+  offline?: boolean;
 }
 
 const EMPTY_STORE: SessionStore = { activeId: "", sessions: [] };
 const NO_MESSAGES: ChatMsg[] = [];
 
-export default function ChatPage({ status }: Props) {
+export default function ChatPage({ status, offline = false }: Props) {
   const profileId = status?.profile?.id || "local";
   const [sessionState, setSessionState] = useState<{ profileId: string; store: SessionStore }>(() => ({
     profileId: "local",
@@ -34,6 +37,9 @@ export default function ChatPage({ status }: Props) {
   const [activeRequest, setActiveRequest] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
+  const [projectOpen, setProjectOpen] = useState(
+    () => new URLSearchParams(window.location.search).get("project") === "1",
+  );
 
   const messagesRef = useRef<ChatMsg[]>(messages);
   messagesRef.current = messages;
@@ -210,6 +216,7 @@ export default function ChatPage({ status }: Props) {
         body: {
           messages: [...history, { role: "user", content: text }],
           timeout: Number(timeoutSec) || 600,
+          cwd: session.cwd || undefined,
         },
       });
       if (!response.ok) {
@@ -244,7 +251,7 @@ export default function ChatPage({ status }: Props) {
   };
 
   const addSession = () => {
-    const session = createSession();
+    const session = createSession("新对话", [], active?.cwd);
     setSessionState((prev) => ({
       ...prev,
       store: { activeId: session.id, sessions: [session, ...prev.store.sessions] },
@@ -281,6 +288,17 @@ export default function ChatPage({ status }: Props) {
       });
     }
     setEditingId(null);
+  };
+
+  const pickProject = (cwd: string) => {
+    if (!active) return;
+    setSessionState((prev) => {
+      if (prev.profileId !== profileId) return prev;
+      const sessions = prev.store.sessions.map((session) =>
+        session.id === active.id ? { ...session, cwd } : session,
+      );
+      return { ...prev, store: { ...prev.store, sessions } };
+    });
   };
 
   const clearCurrent = () => {
@@ -344,6 +362,7 @@ export default function ChatPage({ status }: Props) {
                       <span className="session-meta">
                         {relativeTime(session.updatedAt)}
                         {stepsOf(session) > 0 ? ` · ${stepsOf(session)} 步` : ""}
+                        {session.cwd ? ` · ${projectLabel(session.cwd)}` : ""}
                       </span>
                     </button>
                   )}
@@ -361,6 +380,14 @@ export default function ChatPage({ status }: Props) {
         <header className="card-head">
           <div className="row-flex">
             <h2>对话</h2>
+            <button
+              className="project-chip"
+              onClick={() => setProjectOpen(true)}
+              title={active?.cwd || "使用服务端默认目录"}
+            >
+              {projectLabel(active?.cwd)}
+              <span className="chev">▾</span>
+            </button>
             <span className="muted small mono">经 /v1 调用 · {status?.baseUrl ?? ""}</span>
           </div>
           <div className="row-flex">
@@ -379,6 +406,12 @@ export default function ChatPage({ status }: Props) {
             </button>
           </div>
         </header>
+
+        {offline && (
+          <div className="banner warn chat-banner">
+            连接中断：历史消息仍可查看，发送已禁用。请到「连接」页检查地址与 Key。
+          </div>
+        )}
 
         <div className="chat-body">
           {messages.length === 0 && (
@@ -434,6 +467,13 @@ export default function ChatPage({ status }: Props) {
           </div>
         </div>
       </section>
+
+      <ProjectPicker
+        open={projectOpen}
+        current={active?.cwd}
+        onClose={() => setProjectOpen(false)}
+        onPick={pickProject}
+      />
     </div>
   );
 }

@@ -230,6 +230,7 @@ function createWindow() {
     query: {
       tab: process.env.MYFLICKER_DESKTOP_TAB || "",
       prompt: process.env.MYFLICKER_DESKTOP_CHAT_PROMPT || "",
+      project: process.env.MYFLICKER_DESKTOP_PROJECT || "",
     },
   });
 
@@ -302,6 +303,18 @@ ipcMain.handle("tasks:result", (_event, taskId, includeEvents) =>
 );
 ipcMain.handle("tasks:list", (_event, limit) => api.listTasks(limit || 20));
 ipcMain.handle("tasks:cancel", (_event, taskId) => api.cancel(taskId));
+
+ipcMain.handle("workspaces:list", async (_event, path) => {
+  const response = await api.workspaces(String(path || ""));
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: response.data?.error?.message || response.error || `HTTP ${response.status}`,
+    };
+  }
+  return { ok: true, ...response.data };
+});
 
 // ------------------------------------------------------------------- chat ---
 // The console talks to the public OpenAI-compatible API, exactly like a LAN

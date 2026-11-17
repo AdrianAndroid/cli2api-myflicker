@@ -630,6 +630,60 @@ async def submit_task(
     )
 
 
+@app.get("/api/myflicker/workspaces")
+async def list_workspaces(
+    request: Request,
+    path: Optional[str] = None,
+    identity: Identity = Depends(verify_api_key),
+) -> JSONResponse:
+    """List sub-directories under the caller's workspace (sandboxed).
+
+    Used by the desktop workspace picker; ``path`` may be absolute or relative
+    to the workspace and is validated with the same rules as task ``cwd``.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    workspace = identity.ensure_workspace().resolve()
+    try:
+        target = resolve_cwd(identity, (path or "").strip() or None, client_ip).resolve()
+    except PermissionError as exc:
+        raise HTTPException(
+            403,
+            {
+                "code": "cwd_outside_workspace",
+                "message": str(exc),
+                "workspace": str(workspace),
+            },
+        )
+    if not target.is_dir():
+        raise HTTPException(
+            404, {"code": "invalid_cwd", "message": f"cwd does not exist: {target}"}
+        )
+
+    dirs: List[Dict[str, str]] = []
+    try:
+        for child in sorted(target.iterdir(), key=lambda item: item.name.lower()):
+            if len(dirs) >= 200:
+                break
+            if child.name.startswith(".") or not child.is_dir():
+                continue
+            dirs.append({"name": child.name, "path": str(child)})
+    except OSError as exc:
+        raise HTTPException(400, {"code": "unreadable_cwd", "message": str(exc)})
+
+    parent = None
+    if target != workspace and within(target.parent, workspace):
+        parent = str(target.parent)
+
+    return JSONResponse(
+        {
+            "workspace": str(workspace),
+            "cwd": str(target),
+            "parent": parent,
+            "dirs": dirs,
+        }
+    )
+
+
 @app.get("/api/myflicker/result/{task_id}")
 async def get_result(
     task_id: str,

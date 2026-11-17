@@ -65,6 +65,21 @@ export interface ProfileList {
   profiles: Profile[];
 }
 
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceListing {
+  ok: boolean;
+  workspace?: string;
+  cwd?: string;
+  parent?: string | null;
+  dirs?: WorkspaceEntry[];
+  status?: number;
+  error?: string;
+}
+
 export interface ProbeResult {
   ok: boolean;
   stage?: string;
@@ -160,6 +175,7 @@ export interface Bridge {
   pickDir(): Promise<string | null>;
   openPath(target: string): Promise<string>;
   netUrls(): Promise<Array<{ iface: string; url: string }>>;
+  listWorkspaces(path?: string): Promise<WorkspaceListing>;
 
   chatStart(payload: { requestId: string; body: Record<string, unknown> }): Promise<{ ok: boolean; requestId?: string; error?: string }>;
   chatAbort(requestId: string): Promise<{ ok: boolean }>;

@@ -210,11 +210,6 @@ export default function App() {
         </header>
 
         <main className={`screen ${shownTab === "chat" ? "no-scroll" : ""}`}>
-          {offline && (
-            <div className="banner warn">
-              连接中断：历史消息仍可查看，发送已禁用。请到「连接」页检查地址与 Key。
-            </div>
-          )}
           {shownTab === "connect" && <ConnectPage status={status} onConnected={setStatus} />}
           {shownTab === "overview" && (
             <OverviewPage
@@ -229,7 +224,7 @@ export default function App() {
           {/* chat stays mounted so switching pages (or an in-flight stream) does not lose state */}
           {(role === "provider" || connected || savedProfile) && (
             <div className={shownTab === "chat" ? "tab-pane" : "tab-pane hidden"}>
-              <ChatPage status={status} />
+              <ChatPage status={status} offline={offline} />
             </div>
           )}
           {shownTab === "logs" && <LogsPage status={status} />}

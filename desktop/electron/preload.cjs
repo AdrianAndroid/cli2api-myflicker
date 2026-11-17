@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld("api", {
   openPath: (target) => ipcRenderer.invoke("shell:open", target),
 
   netUrls: () => ipcRenderer.invoke("net:urls"),
+  listWorkspaces: (path) => ipcRenderer.invoke("workspaces:list", path),
 
   getRole: () => ipcRenderer.invoke("app:role"),
   setRole: (role) => ipcRenderer.invoke("app:role", role),

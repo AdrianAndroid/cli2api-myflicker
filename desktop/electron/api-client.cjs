@@ -90,6 +90,11 @@ class ApiClient {
     return this.request("GET", `/api/myflicker/result/${taskId}${query}`);
   }
 
+  workspaces(path = "") {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request("GET", `/api/myflicker/workspaces${query}`, { timeoutMs: 8000 });
+  }
+
   listTasks(limit = 20) {
     return this.request("GET", `/api/myflicker/tasks?limit=${limit}`, { admin: true });
   }
