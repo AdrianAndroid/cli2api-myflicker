@@ -388,6 +388,7 @@ def run_myflicker(
     env_extra: Optional[Dict[str, Any]] = None,
     source: Optional[str] = None,
     submitted_at: Optional[str] = None,
+    stdin_payload: Optional[str] = None,
 ) -> Dict[str, Any]:
     args = [str(arg) for arg in (cli_args or [])]
     command = [MYFLICKER_BIN] + args
@@ -445,7 +446,7 @@ def run_myflicker(
                 command,
                 cwd=run_cwd,
                 env=child_env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if stdin_payload else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -468,6 +469,14 @@ def run_myflicker(
             pid = proc.pid
             update_task_state(task_id, {"pid": pid})
             log_event(task_id, "process.started", pid=pid, command=command, cwd=run_cwd)
+
+            if stdin_payload:
+                try:
+                    assert proc.stdin is not None
+                    proc.stdin.write(stdin_payload)
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError) as exc:
+                    log_event(task_id, "process.stdin_error", level="WARNING", error=str(exc))
 
             clock = time.monotonic()
             out_chunks: List[str] = []

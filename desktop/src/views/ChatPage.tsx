@@ -1,244 +1,252 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ServiceStatus, TaskResult } from "../types";
-import { STATUS_LABEL, duration, shortId, tokenize } from "../lib/format";
+import type { ChatEvent, ServiceStatus } from "../types";
 
 interface Props {
   status: ServiceStatus | null;
 }
 
-interface Message {
+type Step =
+  | { kind: "tool"; id: string; name: string; input: string }
+  | { kind: "result"; id: string; text: string };
+
+interface ChatMsg {
   id: string;
-  role: "user" | "agent";
+  role: "user" | "assistant";
   text: string;
-  args?: string[];
+  steps: Step[];
+  status: "streaming" | "done" | "error" | "aborted";
   taskId?: string;
-  state?: "pending" | "running" | "success" | "failure" | "canceled" | "error";
-  elapsedMs?: number;
-  result?: TaskResult;
+  sessionId?: string;
   error?: string;
-  expand?: boolean;
-  quiet?: boolean;
 }
 
-const uid = () => Math.random().toString(36).slice(2);
+const uid = () => Math.random().toString(36).slice(2, 10);
 
-const quoteArg = (arg: string) => (/\s/.test(arg) ? JSON.stringify(arg) : arg);
+const STORAGE_KEY = "myflicker.chat.messages.v1";
+const MAX_PERSISTED = 60;
+const MAX_STORAGE_BYTES = 512 * 1024;
 
-/** myflicker is an interactive agent CLI: -q/--quiet is what makes it one-shot. */
-function buildPromptArgs(prompt: string, cont: boolean): string[] {
-  const args = ["-q"];
-  if (cont) args.push("-c");
-  args.push(prompt);
-  return args;
+/** Reload the transcript after a restart; dangling streams become "aborted". */
+function loadMessages(): ChatMsg[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((msg: ChatMsg) =>
+      msg.status === "streaming" ? { ...msg, status: "aborted" as const } : msg,
+    );
+  } catch {
+    return [];
+  }
 }
 
 export default function ChatPage({ status }: Props) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: uid(),
-      role: "agent",
-      text: "输入 myflicker 参数即可执行（例如 list --verbose）。支持 /timeout 600、/cwd /path、/env K=V、/clear。",
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMsg[]>(loadMessages);
   const [input, setInput] = useState("");
-  const [sessionTimeout, setSessionTimeout] = useState<string>("600");
-  const [sessionCwd, setSessionCwd] = useState<string>("");
-  const [sessionEnv, setSessionEnv] = useState<Record<string, string>>({});
-  const [mode, setMode] = useState<"prompt" | "args">(
-    (localStorage.getItem("myflicker.chat.mode") as "prompt" | "args") || "prompt",
-  );
-  const [cont, setCont] = useState<boolean>(localStorage.getItem("myflicker.chat.cont") === "1");
-  const running = status?.state === "running";
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const messagesRef = useRef(messages);
+  const [timeoutSec, setTimeoutSec] = useState("600");
+  const [activeRequest, setActiveRequest] = useState<string | null>(null);
+  const messagesRef = useRef<ChatMsg[]>([]);
   messagesRef.current = messages;
+  const requestMap = useRef<Map<string, string>>(new Map());
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const running = status?.state === "running";
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
-
-  const patch = useCallback((id: string, next: Partial<Message>) => {
-    setMessages((prev) => prev.map((item) => (item.id === id ? { ...item, ...next } : item)));
+  const patch = useCallback((id: string, update: (msg: ChatMsg) => ChatMsg) => {
+    setMessages((prev) => prev.map((msg) => (msg.id === id ? update(msg) : msg)));
   }, []);
 
-  const watch = useCallback(
-    async (agentId: string, taskId: string) => {
-      const startedAt = Date.now();
-      for (let attempt = 0; attempt < 600; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 400 : 1000));
-        const response = await window.api.result(taskId, true);
-        if (!response.ok) {
-          if (response.status === 404) {
-            patch(agentId, { state: "error", error: "任务已过期或不存在" });
-            return;
-          }
-          continue;
-        }
-        const data = response.data as TaskResult;
-        const elapsedMs = Date.now() - startedAt;
-        if (data.finished) {
-          patch(agentId, { state: data.status, result: data, elapsedMs });
-          return;
-        }
-        patch(agentId, { state: data.status === "running" ? "running" : "pending", elapsedMs });
+  const applyAgentEvent = useCallback(
+    (msgId: string, event: any) => {
+      const type = event?.type;
+      if (type === "system" && event?.subtype === "init") {
+        patch(msgId, (msg) => ({ ...msg, sessionId: event.sessionId ?? msg.sessionId }));
+        return;
       }
-      patch(agentId, { state: "error", error: "轮询超时（客户端放弃等待）" });
+      if (type === "message" && event?.role === "assistant" && Array.isArray(event.content)) {
+        for (const block of event.content) {
+          if (block?.type === "tool_use") {
+            patch(msgId, (msg) => ({
+              ...msg,
+              steps: [
+                ...msg.steps,
+                {
+                  kind: "tool",
+                  id: uid(),
+                  name: String(block.name ?? "tool"),
+                  input: JSON.stringify(block.input ?? {}),
+                },
+              ],
+            }));
+          }
+        }
+        return;
+      }
+      if (type === "message" && event?.role === "tool" && Array.isArray(event.content)) {
+        const text = event.content
+          .map((block: any) =>
+            typeof block?.content === "string" ? block.content : JSON.stringify(block?.content ?? block),
+          )
+          .join("\n");
+        patch(msgId, (msg) => ({ ...msg, steps: [...msg.steps, { kind: "result", id: uid(), text }] }));
+      }
     },
     [patch],
   );
 
-  const send = useCallback(async () => {
-    const raw = input.trim();
-    if (!raw) return;
+  useEffect(() => {
+    const off = window.api.onChatEvent((event: ChatEvent) => {
+      const msgId = requestMap.current.get(event.requestId);
+      if (!msgId) return;
+
+      if (event.type === "chunk" && event.data) {
+        const chunk = event.data;
+        if (chunk.x_myflicker_event) applyAgentEvent(msgId, chunk.x_myflicker_event);
+        if (chunk.x_myflicker?.task_id) {
+          patch(msgId, (msg) => ({ ...msg, taskId: chunk.x_myflicker.task_id }));
+        }
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) {
+          patch(msgId, (msg) => ({ ...msg, text: msg.text + delta }));
+        }
+        return;
+      }
+
+      const finish = (status: ChatMsg["status"], error?: string) => {
+        patch(msgId, (msg) => ({ ...msg, status, error: error ?? msg.error }));
+        requestMap.current.delete(event.requestId);
+        setActiveRequest((current) => (current === event.requestId ? null : current));
+      };
+      if (event.type === "done") finish("done");
+      else if (event.type === "error") finish("error", event.message || `HTTP ${event.status}`);
+      else if (event.type === "aborted") finish("aborted");
+    });
+    return off;
+  }, [applyAgentEvent, patch]);
+
+  // persist the transcript (bounded, storage errors ignored)
+  useEffect(() => {
+    try {
+      let keep = messages.slice(-MAX_PERSISTED);
+      let serialized = JSON.stringify(keep);
+      while (serialized.length > MAX_STORAGE_BYTES && keep.length > 1) {
+        keep = keep.slice(1);
+        serialized = JSON.stringify(keep);
+      }
+      localStorage.setItem(STORAGE_KEY, serialized);
+    } catch {
+      /* quota exceeded: keep working in memory */
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length, messages[messages.length - 1]?.text]);
+
+  const send = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || !running || activeRequest) return;
     setInput("");
 
-    if (raw.startsWith("/")) {
-      const [command, ...rest] = raw.split(/\s+/);
-      const value = rest.join(" ");
-      if (command === "/clear") {
-        setMessages([]);
-        return;
-      }
-      if (command === "/timeout") {
-        setSessionTimeout(value);
-        setMessages((prev) => [...prev, { id: uid(), role: "agent", text: `会话超时设为 ${value || "默认"} 秒` }]);
-        return;
-      }
-      if (command === "/cwd") {
-        setSessionCwd(value);
-        setMessages((prev) => [...prev, { id: uid(), role: "agent", text: `会话 cwd 设为 ${value || "默认"}` }]);
-        return;
-      }
-      if (command === "/env") {
-        const index = value.indexOf("=");
-        if (index > 0) {
-          const key = value.slice(0, index);
-          const val = value.slice(index + 1);
-          setSessionEnv((prev) => ({ ...prev, [key]: val }));
-          setMessages((prev) => [...prev, { id: uid(), role: "agent", text: `已设置环境变量 ${key}` }]);
-          return;
-        }
-      }
-      setMessages((prev) => [
-        ...prev,
-        { id: uid(), role: "agent", text: "未知指令。支持 /timeout、/cwd、/env K=V、/clear" },
-      ]);
-      return;
+    const history = messagesRef.current
+      .filter((msg) => msg.text.trim().length > 0)
+      .map((msg) => ({ role: msg.role, content: msg.text }));
+
+    const userMsg: ChatMsg = { id: uid(), role: "user", text, steps: [], status: "done" };
+    const assistantMsg: ChatMsg = { id: uid(), role: "assistant", text: "", steps: [], status: "streaming" };
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+    const requestId = uid();
+    requestMap.current.set(requestId, assistantMsg.id);
+    setActiveRequest(requestId);
+
+    const response = await window.api.chatStart({
+      requestId,
+      body: {
+        messages: [...history, { role: "user", content: text }],
+        timeout: Number(timeoutSec) || 600,
+      },
+    });
+    if (!response.ok) {
+      patch(assistantMsg.id, (msg) => ({ ...msg, status: "error", error: response.error ?? "stream failed" }));
+      setActiveRequest(null);
     }
+  }, [activeRequest, input, patch, running, timeoutSec]);
 
-    const args =
-      mode === "prompt" ? buildPromptArgs(raw, cont) : tokenize(raw);
-    if (args.length === 0) return;
-    const userId = uid();
-    const agentId = uid();
-    setMessages((prev) => [
-      ...prev,
-      { id: userId, role: "user", text: raw },
-      { id: agentId, role: "agent", text: "提交中…", args, state: "pending" },
-      { id: uid(), role: "agent", text: `$ myflicker ${args.map(quoteArg).join(" ")}`, quiet: true } as Message,
+  // smoke-test hook: ?prompt=... auto-sends one turn (used by headless capture)
+  const autoPrompt = new URLSearchParams(window.location.search).get("prompt") || "";
+  const autoSent = useRef(false);
+  useEffect(() => {
+    if (!running || !autoPrompt || autoSent.current) return;
+    autoSent.current = true;
+    void send(autoPrompt);
+  }, [autoPrompt, running, send]);
 
-    ]);
-
-    const payload: Record<string, unknown> = { args, source: "chat" };
-    if (sessionTimeout.trim()) payload.timeout = Number(sessionTimeout);
-    if (sessionCwd.trim()) payload.cwd = sessionCwd.trim();
-    if (Object.keys(sessionEnv).length) payload.env = sessionEnv;
-
-    const response = await window.api.submit(payload);
-    if (!response.ok || !response.data) {
-      patch(agentId, {
-        state: "error",
-        error: (response.data as any)?.error?.message ?? response.error ?? `HTTP ${response.status}`,
-        text: "提交失败",
-      });
-      return;
-    }
-    const taskId = response.data.task_id;
-    patch(agentId, { taskId, text: "", state: "pending" });
-    void watch(agentId, taskId);
-  }, [cont, input, mode, patch, sessionCwd, sessionEnv, sessionTimeout, watch]);
+  const stop = useCallback(() => {
+    if (activeRequest) void window.api.chatAbort(activeRequest);
+  }, [activeRequest]);
 
   return (
     <div className="page chat-page">
       <section className="card chat-card">
         <header className="card-head">
-          <h2>聊天测试</h2>
           <div className="row-flex">
-            <span className="muted small">
-              {running ? `${status?.baseUrl} · 队列 ${status?.queueDepth ?? 0} · worker ×${status?.workers ?? 0}` : "服务未启动"}
-            </span>
-            <button className="btn small ghost" onClick={() => setMessages([])}>
+            <h2>对话</h2>
+            <span className="muted small mono">经 /v1 调用 · {status?.baseUrl ?? ""}</span>
+          </div>
+          <div className="row-flex">
+            <label className="check">
+              超时
+              <input
+                className="input"
+                style={{ width: 62, padding: "4px 8px" }}
+                value={timeoutSec}
+                onChange={(event) => setTimeoutSec(event.target.value)}
+              />
+              s
+            </label>
+            <button
+              className="btn small ghost"
+              onClick={() => {
+                setMessages([]);
+                try {
+                  localStorage.removeItem(STORAGE_KEY);
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
               清空
             </button>
           </div>
         </header>
 
         <div className="chat-body">
-          {messages.map((message) => (
-            <MessageRow
-              key={message.id}
-              message={message}
-              onToggle={() =>
-                patch(message.id, {
-                  expand: !message.expand,
-                  result: message.result ?? (message.taskId ? undefined : message.result),
-                })
-              }
-              onCancel={async () => {
-                if (message.taskId) await window.api.cancel(message.taskId);
-              }}
-            />
-          ))}
+          {messages.length === 0 && (
+            <div className="agent-bubble plain chat-empty">
+              {running
+                ? "直接问：agent 会在自己的工作区里读文件、跑命令，每一步 tool call 都会显示在这里。"
+                : "服务未启动，先点底部的服务条启动。"}
+            </div>
+          )}
+
+          {messages.map((msg) =>
+            msg.role === "user" ? (
+              <div className="msg user" key={msg.id}>
+                <div className="bubble">{msg.text}</div>
+              </div>
+            ) : (
+              <AssistantCard key={msg.id} msg={msg} onStop={stop} active={activeRequest !== null} />
+            ),
+          )}
           <div ref={bottomRef} />
         </div>
 
         <div className="chat-input">
-          <div className="row-flex chat-controls">
-            <div className="segmented">
-              <button
-                className={mode === "prompt" ? "active" : ""}
-                onClick={() => {
-                  setMode("prompt");
-                  localStorage.setItem("myflicker.chat.mode", "prompt");
-                }}
-              >
-                对话（自动 -q）
-              </button>
-              <button
-                className={mode === "args" ? "active" : ""}
-                onClick={() => {
-                  setMode("args");
-                  localStorage.setItem("myflicker.chat.mode", "args");
-                }}
-              >
-                参数（原样透传）
-              </button>
-            </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={cont}
-                onChange={(event) => {
-                  setCont(event.target.checked);
-                  localStorage.setItem("myflicker.chat.cont", event.target.checked ? "1" : "0");
-                }}
-              />
-              续接上次会话 (-c)
-            </label>
-            <span className="muted small mono chat-hint">
-              /timeout {sessionTimeout || "默认"} · /cwd {sessionCwd || "默认"} · env{" "}
-              {Object.keys(sessionEnv).join(",") || "无"}
-            </span>
-          </div>
-          {mode === "args" && !/\s-q\b|--quiet|--help|--version/.test(input) && input.trim() && (
-            <div className="text-warn small">
-              提示：myflicker 默认是交互模式，缺少 -q 会一直等待输入直到超时。
-            </div>
-          )}
           <div className="row-flex">
             <input
               className="input"
-              placeholder={mode === "prompt" ? "帮我看下这个仓库的目录结构" : "-q --help"}
+              placeholder={running ? "问点什么，例如：看下这个仓库的结构" : "服务未启动"}
               value={input}
               disabled={!running}
               onChange={(event) => setInput(event.target.value)}
@@ -249,9 +257,15 @@ export default function ChatPage({ status }: Props) {
                 }
               }}
             />
-            <button className="btn primary" disabled={!running} onClick={() => void send()}>
-              发送
-            </button>
+            {activeRequest ? (
+              <button className="btn danger" onClick={stop}>
+                停止
+              </button>
+            ) : (
+              <button className="btn primary" disabled={!running} onClick={() => void send()}>
+                发送
+              </button>
+            )}
           </div>
         </div>
       </section>
@@ -259,73 +273,43 @@ export default function ChatPage({ status }: Props) {
   );
 }
 
-function MessageRow({
-  message,
-  onToggle,
-  onCancel,
-}: {
-  message: Message;
-  onToggle: () => void;
-  onCancel: () => void;
-}) {
-  if (message.quiet) {
-    return <div className="msg agent mono-line">{message.text}</div>;
-  }
-
-  if (message.role === "user") {
-    return (
-      <div className="msg user">
-        <div className="bubble">{message.text}</div>
-      </div>
-    );
-  }
-
-  const state = message.state ?? "pending";
-  const label = STATUS_LABEL[state] ?? (state === "error" ? "错误" : state);
-  const detail = message.result;
+function AssistantCard({ msg, onStop, active }: { msg: ChatMsg; onStop: () => void; active: boolean }) {
+  const badge =
+    msg.status === "done" ? "st-success" : msg.status === "error" ? "st-failure" : msg.status === "aborted" ? "st-canceled" : "st-running";
+  const label =
+    msg.status === "done" ? "完成" : msg.status === "error" ? "失败" : msg.status === "aborted" ? "已停止" : "执行中";
 
   return (
     <div className="msg agent">
-      <div className="bubble agent-bubble">
+      <div className="agent-bubble">
         <div className="bubble-head">
           <span className="mono small">myflicker</span>
-          <span className={`badge st-${state}`}>{label}</span>
-          {message.elapsedMs !== undefined && state !== "success" && state !== "failure" && (
-            <span className="muted small mono">{duration(message.elapsedMs)}</span>
-          )}
-          {detail && <span className="muted small mono">{duration(detail.duration_ms)}</span>}
-          {message.taskId && (
-            <span className="muted small mono" title={message.taskId}>
-              {shortId(message.taskId)}
-            </span>
-          )}
-          {state === "pending" && message.taskId && (
-            <button className="btn small ghost" onClick={onCancel}>
-              取消排队
+          <span className={`badge ${badge}`}>{label}</span>
+          {msg.sessionId && <span className="muted small mono">session {msg.sessionId}</span>}
+          {msg.taskId && <span className="muted small mono">{msg.taskId.slice(0, 8)}…</span>}
+          {active && msg.status === "streaming" && (
+            <button className="btn small ghost" onClick={onStop}>
+              停止
             </button>
           )}
         </div>
 
-        {message.error && <div className="text-error small">{message.error}</div>}
-        {state === "running" && <div className="muted small">执行中…</div>}
-        {state === "pending" && <div className="muted small">排队中，等待串行 worker 取任务…</div>}
-
-        {detail && (
-          <>
-            {detail.error && <div className="text-error small">{detail.error}</div>}
-            <pre className="pre chat-pre">{detail.stdout || "（无输出）"}</pre>
-            {detail.stderr ? (
-              <button className="btn small ghost" onClick={onToggle}>
-                stderr ({detail.stderr.length}) {message.expand ? "隐藏" : "展开"}
-              </button>
-            ) : null}
-            {message.expand && detail.stderr && <pre className="pre chat-pre error-pre">{detail.stderr}</pre>}
-            <div className="row-flex muted small mono">
-              <span>rc={detail.returncode ?? "—"}</span>
-              {detail.cmdline && <span className="ellipsis">{detail.cmdline}</span>}
+        {msg.steps.map((step) =>
+          step.kind === "tool" ? (
+            <div className="tool-card" key={step.id}>
+              <span className="tool-name">{step.name}</span>
+              <code className="tool-input mono">{step.input}</code>
             </div>
-          </>
+          ) : (
+            <details className="tool-result" key={step.id}>
+              <summary>tool result</summary>
+              <pre className="pre chat-pre">{step.text || "（空）"}</pre>
+            </details>
+          ),
         )}
+
+        {msg.text && <pre className="pre chat-pre">{msg.text}</pre>}
+        {msg.error && <div className="text-error small">{msg.error}</div>}
       </div>
     </div>
   );

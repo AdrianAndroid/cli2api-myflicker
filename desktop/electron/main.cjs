@@ -160,7 +160,10 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, "..", "dist", "index.html"), {
-    query: { tab: process.env.MYFLICKER_DESKTOP_TAB || "" },
+    query: {
+      tab: process.env.MYFLICKER_DESKTOP_TAB || "",
+      prompt: process.env.MYFLICKER_DESKTOP_CHAT_PROMPT || "",
+    },
   });
 
   manager.on("status", (status) => {
@@ -221,6 +224,79 @@ ipcMain.handle("tasks:result", (_event, taskId, includeEvents) =>
 );
 ipcMain.handle("tasks:list", (_event, limit) => api.listTasks(limit || 20));
 ipcMain.handle("tasks:cancel", (_event, taskId) => api.cancel(taskId));
+
+// ------------------------------------------------------------------- chat ---
+// The console talks to the public OpenAI-compatible API, exactly like a LAN
+// client would: same base URL, same key, same protocol. Keys stay in main.
+const chatStreams = new Map();
+
+ipcMain.handle("chat:start", async (_event, payload) => {
+  const requestId = payload && payload.requestId;
+  if (!requestId) return { ok: false, error: "missing requestId" };
+  const controller = new AbortController();
+  chatStreams.set(requestId, controller);
+  const send = (message) => {
+    if (win && !win.isDestroyed()) win.webContents.send("chat:event", { requestId, ...message });
+  };
+
+  (async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${api.port()}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${api.taskKey()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model: "myflicker-agent", ...payload.body, stream: true, events: true }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        send({ type: "error", status: response.status, message: await response.text() });
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let index;
+        while ((index = buffer.indexOf("\n\n")) >= 0) {
+          const block = buffer.slice(0, index);
+          buffer = buffer.slice(index + 2);
+          for (const line of block.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (data === "[DONE]") {
+              send({ type: "done" });
+              return;
+            }
+            try {
+              send({ type: "chunk", data: JSON.parse(data) });
+            } catch {
+              /* ignore keep-alive / malformed frames */
+            }
+          }
+        }
+      }
+      send({ type: "done" });
+    } catch (error) {
+      if (error.name !== "AbortError") send({ type: "error", message: `${error.name}: ${error.message}` });
+      else send({ type: "aborted" });
+    } finally {
+      chatStreams.delete(requestId);
+    }
+  })();
+
+  return { ok: true, requestId };
+});
+
+ipcMain.handle("chat:abort", (_event, requestId) => {
+  const controller = chatStreams.get(requestId);
+  if (controller) controller.abort();
+  return { ok: true };
+});
 
 // ------------------------------------------------------------------- logs ---
 ipcMain.handle("logs:tail", (_event, source, cursor) => logBus.tail(source, Number(cursor) || 0));

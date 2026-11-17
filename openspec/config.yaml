@@ -1,0 +1,45 @@
+schema: spec-driven
+
+context: |
+  Language: zh
+  All artifacts must be written in zh.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Tech stack: Python 3.13 (FastAPI + Celery + Redis), Electron + React + TypeScript.
+  Product: 把本机私有 CLI myflicker 封装成 HTTP 网关（私有任务接口 + OpenAI 兼容接口），
+  并用 Electron 控制台管理 Redis / FastAPI / 每用户 worker。
+
+  必须始终成立的前提（写需求时不得违反）：
+  - myflicker 的互斥锁是“按工作目录”的：同一目录只能有一个进程，不同目录可以并发。
+  - 因此执行拓扑是“每个 API key 一条串行通道，用户之间并行”。
+  - 每个 key 的上下文（myflicker 会话）按工作目录隔离，`-c` 只能续自己的会话。
+  - 额度共享，但队列、任务可见性、工作区必须按 key 隔离。
+
+rules:
+  specs:
+    - 涉及并发/队列/锁的需求，必须写明"同目录串行、跨目录并行"的约束
+    - 涉及 HTTP 接口的需求，必须写明鉴权方式与错误码
+  tasks:
+    - 每项任务必须可独立验收，包含对应的验证方式
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

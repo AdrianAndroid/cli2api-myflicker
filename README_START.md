@@ -187,6 +187,15 @@ curl -s -X POST "$BASE/api/myflicker/submit" -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" -d '{"args": "list"}'
 ```
 
+请求标识（排查用）：
+
+```bash
+# 响应头固定返回 X-Request-Id；也可以自带，便于跨系统串联
+curl -s -D - -o /dev/null -X POST "$BASE/api/myflicker/submit" \
+  -H "X-API-Key: $API_KEY" -H "X-Request-Id: trace-001" \
+  -H "Content-Type: application/json" -d '{"args":["list"]}' | grep -i x-request-id
+```
+
 ### 5.2 轮询结果
 
 ```bash
@@ -474,13 +483,15 @@ npm start            # 启动桌面应用
 
 `npm start` 打开窗口后：
 
+界面为「大标题 + 卡片 + 底部 Tab」：**总览 / 任务 / 聊天 / 日志 / 设置**，底部常驻服务条可直接启停。
+
 | 页面 | 能做什么 |
 | --- | --- |
+| 总览 | 队列 / 在线 worker / 运行时长三项大号指标，当前最繁忙任务，身份与局域网卡片，最近任务 |
 | 任务 | 提交任务（args 逐项、timeout、cwd、env），列表实时刷新，查看 stdout/stderr/事件链，取消排队任务 |
 | 聊天 | 用自然语言行（其实是 myflicker 参数）连续测试，`/timeout`、`/cwd`、`/env K=V` 会话级指令 |
 | 日志 | worker/api/redis 实时输出，关键字过滤、暂停、打开日志文件 |
-| 局域网 | 本机/LAN 切换、展示调用地址（IP 与 `.local`）、Key 掩码与轮换、安全策略、curl 示例 |
-| 设置 | `.env` 结构化编辑（文件/目录选择器）、保存后提示重启 |
+| 设置 | 访问范围（本机/LAN 切换）、调用地址、Key 掩码与轮换、安全策略、curl 示例、`.env` 结构化编辑 |
 
 启动顺序由主进程状态机控制：`Redis → FastAPI → Worker(--concurrency=1) → /health 自检`；
 停止顺序反向，Worker 给 10s 优雅退出，超时对**整个进程组** SIGKILL。
@@ -660,4 +671,53 @@ curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" \
 ```
 
 对方看到的永远是自己的 workspace，看不到你的、也看不到其他人的对话。
+
+## 15. 规格驱动开发（OpenSpec）
+
+仓库内置 [OpenSpec](https://github.com/Fission-AI/OpenSpec)（`vendor/openspec` 为源码参考，CLI 单独安装）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/scripts/binary/install.sh | sh
+openspec list --changes             # 进行中的改动
+openspec show add-key-usage-metrics # 提案 + 任务清单
+openspec validate --all --strict    # 提交前必跑
+```
+
+目录约定：
+
+```
+openspec/specs/       现状真相（api-contract / multi-tenancy / worker-model / desktop-console）
+openspec/changes/     提案区（每个改动一个目录：proposal / specs delta / tasks）
+.agents/skills/       给 AI agent 的 OpenSpec 技能文件（init 生成）
+```
+
+为什么需要它：本项目最容易踩的不是语法错误，而是**并发与隔离假设被无意改坏**
+（例如有人"优化"成全局并发就会撞 myflicker 锁）。把这些约定写成 spec 后，
+`openspec validate` 与 code review 一起构成回归防线。
+
+## 16. 聊天页：像局域网客户端一样调用 /v1（含 tool call）
+
+桌面端聊天页**不再走私有 submit 接口**，而是由主进程代理请求公开的 OpenAI 兼容接口，
+和 LAN 客户端用的是同一条链路、同一个 key（key 只存在主进程，不进渲染层）。
+
+```bash
+# 事件模式：返回结构化 agent 事件（tool_use / tool-result / text 增量 / result）
+curl -N -s -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"myflicker-agent","stream":true,"events":true,
+       "messages":[{"role":"user","content":"读取 a.txt 的内容"}]}'
+```
+
+`events:true` 时网关会用 `--output-format stream-json --stream-text` 运行 myflicker，
+并把每条事件放在 SSE 的 `x_myflicker_event` 字段里（OpenAI 客户端会忽略该字段）：
+
+| 事件 | 含义 |
+| --- | --- |
+| `system` + `subtype:"init"` | 会话开始，含 `sessionId` 与可用工具列表 |
+| `message` (role=assistant, `tool_use`) | 一次工具调用（工具名 + 输入） |
+| `message` (role=tool, `tool-result`) | 工具结果 |
+| `text` (`partial:true`) | 文本增量（网关转成标准 `delta.content`） |
+| `result` | 结束，含 `usage` 与 `sessionId` |
+
+界面据此渲染：工具卡片（`read {"file_path":…}`）、可折叠的 tool result、最终文本、session 标识，并支持中途「停止」。
 

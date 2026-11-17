@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ServiceStatus } from "../types";
 import { useEnv } from "../lib/useEnv";
+import LanPage from "./LanPage";
 
 interface Props {
   status: ServiceStatus | null;
@@ -62,6 +63,8 @@ export default function SettingsPage({ status }: Props) {
 
   return (
     <div className="page">
+      <LanPage status={status} />
+
       <section className="card">
         <header className="card-head">
           <h2>配置</h2>

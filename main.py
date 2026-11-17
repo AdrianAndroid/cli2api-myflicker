@@ -221,6 +221,28 @@ async def _lan_guard(request: Request, call_next):
     return await call_next(request)
 
 
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex[:16]
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = request_id
+    return response
+
+
+def _request_id(request: Request) -> str:
+    value = getattr(request.state, "request_id", None)
+    if value:
+        return value
+    generated = uuid.uuid4().hex[:16]
+    request.state.request_id = generated
+    return generated
+
+
 def queue_depth() -> Optional[int]:
     """Depth of the default queue; identity-scoped depth is reported per request."""
     return broker_queue_depth(CELERY_QUEUE)
@@ -508,6 +530,7 @@ async def submit_task(
 
     task_id = uuid.uuid4().hex
     submitted_at = utcnow_iso()
+    request_id = _request_id(request)
     command = [MYFLICKER_BIN] + args
 
     initial_state: Dict[str, Any] = {
@@ -524,6 +547,7 @@ async def submit_task(
         "client_ip": client_ip,
         "user_agent": user_agent,
         "submitted_at": submitted_at,
+        "request_id": request_id,
         "started_at": None,
         "finished_at": None,
         "returncode": None,
@@ -545,6 +569,7 @@ async def submit_task(
     log_event(
         task_id,
         "task.submitted",
+        request_id=request_id,
         args=args,
         source=source,
         client_ip=client_ip,
@@ -593,6 +618,7 @@ async def submit_task(
             "ok": True,
             "task_id": task_id,
             "status": "pending",
+            "request_id": request_id,
             "submitted_at": submitted_at,
             "args": args,
             "cmdline": shlex.join(command),
@@ -653,6 +679,7 @@ async def get_result(
         "ok": True,
         "task_id": task_id,
         "status": status_value,
+        "request_id": state.get("request_id"),
         "submitted_at": state.get("submitted_at"),
         "started_at": state.get("started_at"),
         "finished_at": state.get("finished_at"),

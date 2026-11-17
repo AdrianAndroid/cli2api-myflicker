@@ -77,7 +77,7 @@ export default function LanPage({ status }: Props) {
         </header>
         <div className="card-body">
           {!lanEnabled && <div className="muted small">当前仅本机监听，局域网地址不可用。</div>}
-          {urls.map((item) => (
+          {(lanEnabled ? urls : urls.filter((item) => item.url.includes("127.0.0.1"))).map((item) => (
             <div className="kv-row" key={item.url}>
               <span className="muted small kv-tag">{item.iface}</span>
               <code className={`mono ${lanEnabled || item.url.includes("127.0.0.1") ? "" : "dim"}`}>{item.url}</code>

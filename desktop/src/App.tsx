@@ -1,33 +1,42 @@
 import { useEffect, useState } from "react";
 import type { ServiceStatus } from "./types";
-import { duration } from "./lib/format";
 import TasksPage from "./views/TasksPage";
 import ChatPage from "./views/ChatPage";
 import LogsPage from "./views/LogsPage";
-import LanPage from "./views/LanPage";
 import SettingsPage from "./views/SettingsPage";
+import OverviewPage from "./views/OverviewPage";
 
-type Tab = "tasks" | "chat" | "logs" | "lan" | "settings";
+type Tab = "overview" | "tasks" | "chat" | "logs" | "settings";
 
-const TABS: Array<{ key: Tab; label: string; hint: string }> = [
-  { key: "tasks", label: "任务", hint: "提交 / 排队 / 结果" },
-  { key: "chat", label: "聊天", hint: "对话式测试" },
-  { key: "logs", label: "日志", hint: "worker / api 实时流" },
-  { key: "lan", label: "局域网", hint: "访问控制与地址" },
-  { key: "settings", label: "设置", hint: ".env 配置" },
+const TABS: Array<{ key: Tab; label: string; icon: string }> = [
+  { key: "overview", label: "总览", icon: "M3 13h4v8H3zM10 3h4v18h-4zM17 9h4v12h-4z" },
+  { key: "tasks", label: "任务", icon: "M4 6h16M4 12h16M4 18h10" },
+  { key: "chat", label: "聊天", icon: "M4 5h16v10H8l-4 4z" },
+  { key: "logs", label: "日志", icon: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" },
+  {
+    key: "settings",
+    label: "设置",
+    icon: "M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zM12 3l1.3 2.2 2.5-.4 1 2.3 2.2 1.2-.4 2.5L20.8 12l-2.2 1.2.4 2.5-2.2 1.2-1 2.3-2.5-.4L12 21l-1.3-2.2-2.5.4-1-2.3-2.2-1.2.4-2.5L3.2 12l2.2-1.2-.4-2.5 2.2-1.2 1-2.3 2.5.4z",
+  },
 ];
 
+const TITLES: Record<Tab, string> = {
+  overview: "总览",
+  tasks: "任务",
+  chat: "聊天",
+  logs: "日志",
+  settings: "设置",
+};
+
 function initialTab(): Tab {
-  const requested = new URLSearchParams(window.location.search).get("tab");
-  return (TABS.find((tab) => tab.key === requested)?.key ?? "tasks") as Tab;
+  const requested = new URLSearchParams(window.location.search).get("tab") as Tab | null;
+  return TABS.some((tab) => tab.key === requested) ? (requested as Tab) : "overview";
 }
 
 export default function App() {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [installing, setInstalling] = useState(false);
-  const reload = () => window.api.getStatus().then(setStatus);
 
   useEffect(() => {
     let alive = true;
@@ -38,7 +47,7 @@ export default function App() {
           if (alive) setStatus(next);
         })
         .catch(() => {
-          /* gateway down: keep the last known snapshot */
+          /* keep the last snapshot */
         });
     };
     load();
@@ -51,19 +60,6 @@ export default function App() {
     };
   }, []);
 
-  const initEnv = async () => {
-    setInstalling(true);
-    try {
-      const info = await window.api.setupInit();
-      setStatus((prev) => (prev ? { ...prev, setup: info } : prev));
-      await reload();
-    } catch {
-      await reload();
-    } finally {
-      setInstalling(false);
-    }
-  };
-
   const run = async (action: "start" | "stop" | "restart") => {
     setBusy(true);
     try {
@@ -75,113 +71,89 @@ export default function App() {
   };
 
   const state = status?.state ?? "stopped";
-  const redisOk = Boolean(status?.health?.redis?.ok) || state === "running";
-  const workerOk = (status?.workers ?? 0) > 0;
-  const apiOk = state === "running";
+  const live = state === "running" || state === "starting";
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark" />
-          <div>
-            <div className="brand-title">myflicker</div>
-            <div className="brand-sub">local gateway</div>
-          </div>
+    <div className="shell">
+      <header className="page-head">
+        <h1>{TITLES[tab]}</h1>
+        <div className="subline">
+          <span className={`dot ${state === "running" ? "ok" : state === "error" ? "bad" : "idle"}`} />
+          <span>{status?.health?.identity?.label ?? "local"}</span>
+          <span className="dot-sep">·</span>
+          <span>{stateLabel(state)}</span>
+          {live && <span className="mono">· 队列 {status?.queueDepth ?? 0}</span>}
         </div>
-        <nav>
+      </header>
+
+      <main className="screen">
+        {tab === "overview" && (
+          <OverviewPage
+            status={status}
+            busy={busy}
+            onStart={() => void run("start")}
+            onStop={() => void run("stop")}
+            onRestart={() => void run("restart")}
+          />
+        )}
+        {tab === "tasks" && <TasksPage status={status} />}
+        {/* chat stays mounted so switching tabs (or an in-flight stream) does not lose state */}
+        <div className={tab === "chat" ? "tab-pane" : "tab-pane hidden"}>
+          <ChatPage status={status} />
+        </div>
+        {tab === "logs" && <LogsPage status={status} />}
+        {tab === "settings" && <SettingsPage status={status} />}
+      </main>
+
+      <footer className="dock">
+        <button
+          className="server-pill"
+          disabled={busy}
+          onClick={() => void run(live ? "stop" : "start")}
+        >
+          <span className="server-icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path
+                d="M4 7h16v4H4zM4 13h16v4H4z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <span className="server-text">
+            <span className="server-name">myflicker · {stateLabel(state)}</span>
+            <span className="server-meta">
+              队列 {status?.queueDepth ?? 0} · worker {status?.workers ?? 0} ·{" "}
+              {busy ? "处理中…" : live ? "点击停止" : "点击启动"}
+            </span>
+          </span>
+          <span className="chevron">{live ? "停止" : "启动"}</span>
+        </button>
+
+        <nav className="tabbar">
           {TABS.map((item) => (
             <button
               key={item.key}
-              className={`nav-item ${tab === item.key ? "active" : ""}`}
+              className={`tab-item ${tab === item.key ? "active" : ""}`}
               onClick={() => setTab(item.key)}
             >
-              <span className="nav-label">{item.label}</span>
-              <span className="nav-hint">{item.hint}</span>
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path
+                  d={item.icon}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>{item.label}</span>
             </button>
           ))}
         </nav>
-        <div className="sidebar-foot">
-          <div className={`pill ${state}`}>{stateLabel(state)}</div>
-          <div className="muted small">{status?.baseUrl ?? "http://127.0.0.1:8000"}</div>
-          <div className="muted small">{status?.bin || "MYFLICKER_BIN 未配置"}</div>
-        </div>
-      </aside>
-
-      <main className="main">
-        <header className="statusbar">
-          <div className="dots">
-            <Dot ok={redisOk} label={`Redis :${status?.redis?.port ?? 6379}`} />
-            <Dot ok={workerOk} idle={state !== "running"} label={`Worker ${workerOk ? `×${status?.workers}` : "off"}`} />
-            <Dot ok={apiOk} label={`API :${status?.port ?? 8000}`} />
-          </div>
-
-          <div className="metrics">
-            <Metric label="队列" value={String(status?.queueDepth ?? 0)} />
-            <Metric label="运行" value={duration(status?.uptimeMs ?? 0)} />
-            <Metric label="模式" value={status?.mode === "external" ? "复用" : status?.mode === "owned" ? "托管" : "—"} />
-          </div>
-
-          <div className="actions">
-            {state === "running" || state === "starting" ? (
-              <>
-                <button className="btn ghost" disabled={busy} onClick={() => run("restart")}>
-                  重启
-                </button>
-                <button className="btn danger" disabled={busy} onClick={() => run("stop")}>
-                  停止
-                </button>
-              </>
-            ) : (
-              <button className="btn primary" disabled={busy} onClick={() => run("start")}>
-                {busy ? "启动中…" : "启动服务"}
-              </button>
-            )}
-          </div>
-        </header>
-
-        {status?.setup && !status.setup.ready && !installing && (
-          <div className="banner warn setup-banner">
-            <strong>运行环境未就绪</strong>
-            <span>{status.setup.error || "需要安装 Python 依赖后才能启动服务"}</span>
-            <code className="mono small ellipsis">{status.setup.python}</code>
-            <button className="btn small primary" disabled={busy} onClick={() => void initEnv()}>
-              初始化运行环境
-            </button>
-            <button className="btn small ghost" onClick={() => setTab("logs")}>
-              查看 setup 日志
-            </button>
-          </div>
-        )}
-
-        {installing && (
-          <div className="banner warn setup-banner">
-            <strong>正在初始化运行环境</strong>
-            <span>创建 venv 并安装依赖，可能需要 1–3 分钟，请勿关闭窗口</span>
-            <button className="btn small ghost" onClick={() => setTab("logs")}>
-              查看进度
-            </button>
-          </div>
-        )}
-
-        {status?.state === "error" && status.lastError && (
-          <div className="banner error">
-            <strong>服务异常</strong>
-            <span>{status.lastError}</span>
-            <button className="btn small ghost" onClick={() => setTab("logs")}>
-              查看日志
-            </button>
-          </div>
-        )}
-
-        <div className="content">
-          {tab === "tasks" && <TasksPage status={status} />}
-          {tab === "chat" && <ChatPage status={status} />}
-          {tab === "logs" && <LogsPage status={status} />}
-          {tab === "lan" && <LanPage status={status} />}
-          {tab === "settings" && <SettingsPage status={status} />}
-        </div>
-      </main>
+      </footer>
     </div>
   );
 }
@@ -195,24 +167,5 @@ function stateLabel(state: string): string {
       stopping: "停止中",
       error: "异常",
     }[state] ?? state
-  );
-}
-
-function Dot({ ok, idle, label }: { ok: boolean; idle?: boolean; label: string }) {
-  const cls = idle ? "idle" : ok ? "ok" : "bad";
-  return (
-    <span className="dot-wrap">
-      <span className={`dot ${cls}`} />
-      <span className="dot-label">{label}</span>
-    </span>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="metric">
-      <span className="metric-label">{label}</span>
-      <span className="metric-value">{value}</span>
-    </span>
   );
 }

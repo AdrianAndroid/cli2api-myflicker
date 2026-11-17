@@ -27,6 +27,7 @@ export interface Health {
   max_timeout: number;
   log_dir: string;
   bind: string;
+  identity?: { label: string; workspace: string };
   lan_enabled: boolean;
   lan_urls: string[];
   security: HealthSecurity;
@@ -78,6 +79,7 @@ export interface TaskRow {
   status: "pending" | "running" | "success" | "failure" | "canceled";
   args: string[] | null;
   source: string | null;
+  owner?: string | null;
   client_ip: string | null;
   submitted_at: string | null;
   started_at: string | null;
@@ -100,6 +102,14 @@ export interface TaskResult extends TaskRow {
   events?: Array<Record<string, unknown>>;
 }
 
+export interface ChatEvent {
+  requestId: string;
+  type: "chunk" | "done" | "error" | "aborted";
+  data?: any;
+  status?: number;
+  message?: string;
+}
+
 export interface Bridge {
   getStatus(): Promise<ServiceStatus>;
   start(): Promise<ServiceStatus>;
@@ -119,6 +129,10 @@ export interface Bridge {
   pickDir(): Promise<string | null>;
   openPath(target: string): Promise<string>;
   netUrls(): Promise<Array<{ iface: string; url: string }>>;
+
+  chatStart(payload: { requestId: string; body: Record<string, unknown> }): Promise<{ ok: boolean; requestId?: string; error?: string }>;
+  chatAbort(requestId: string): Promise<{ ok: boolean }>;
+  onChatEvent(callback: (event: ChatEvent) => void): () => void;
   setupStatus(): Promise<SetupInfo>;
   setupInit(): Promise<SetupInfo>;
 }

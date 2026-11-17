@@ -1,3 +1,6 @@
 [submodule "sub2api"]
 	path = sub2api
 	url = git@github.com:Wei-Shaw/sub2api.git
+[submodule "vendor/openspec"]
+	path = vendor/openspec
+	url = git@github.com:Fission-AI/OpenSpec.git

@@ -18,6 +18,14 @@ contextBridge.exposeInMainWorld("api", {
   listTasks: (limit) => ipcRenderer.invoke("tasks:list", limit),
   cancel: (taskId) => ipcRenderer.invoke("tasks:cancel", taskId),
 
+  chatStart: (payload) => ipcRenderer.invoke("chat:start", payload),
+  chatAbort: (requestId) => ipcRenderer.invoke("chat:abort", requestId),
+  onChatEvent: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("chat:event", handler);
+    return () => ipcRenderer.removeListener("chat:event", handler);
+  },
+
   tailLogs: (source, cursor) => ipcRenderer.invoke("logs:tail", source, cursor),
   openLog: (source) => ipcRenderer.invoke("logs:open", source),
 
