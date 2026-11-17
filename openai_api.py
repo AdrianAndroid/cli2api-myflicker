@@ -300,6 +300,24 @@ async def chat_completions(
         return _error(400, "'timeout' must be a number of seconds", "invalid_timeout")
     timeout = max(1.0, min(timeout, MAX_TIMEOUT))
 
+    session_id = body.get("session_id")
+    if session_id is not None:
+        if not isinstance(session_id, str):
+            return _error(400, "'session_id' must be a string", "invalid_session_id")
+        session_id = session_id.strip()
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+        if not (1 <= len(session_id) <= 128) or any(ch not in allowed for ch in session_id):
+            return _error(400, "'session_id' contains invalid characters", "invalid_session_id")
+        # a resumed agent session already carries history; only send the new turn
+        last_user = next(
+            (item for item in reversed(messages) if isinstance(item, dict) and item.get("role") == "user"),
+            None,
+        )
+        if last_user is not None:
+            last_text = _content_text(last_user.get("content")).strip()
+            if last_text:
+                prompt = last_text
+
     events_mode = bool(body.get("events"))
     raw_prefix = body.get("myflicker_args")
     if raw_prefix is not None and (
@@ -329,6 +347,9 @@ async def chat_completions(
     else:
         args_prefix = list(raw_prefix) if raw_prefix is not None else list(DEFAULT_ARGS)
         stdin_payload = None
+
+    if session_id and "--resume" not in args_prefix:
+        args_prefix.extend(["--resume", session_id])
 
     requested_cwd = body.get("cwd") if isinstance(body.get("cwd"), str) else None
     client_ip = request.client.host if request.client else "unknown"

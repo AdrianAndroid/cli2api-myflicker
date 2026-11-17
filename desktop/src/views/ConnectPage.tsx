@@ -4,9 +4,10 @@ import type { ProbeResult, Profile, ProfileList, ServiceStatus } from "../types"
 interface Props {
   status: ServiceStatus | null;
   onConnected: (status: ServiceStatus) => void;
+  embedded?: boolean;
 }
 
-export default function ConnectPage({ status, onConnected }: Props) {
+export default function ConnectPage({ status, onConnected, embedded = false }: Props) {
   const [list, setList] = useState<ProfileList | null>(null);
   const [name, setName] = useState("公司网关");
   const [baseUrl, setBaseUrl] = useState("");
@@ -125,7 +126,7 @@ export default function ConnectPage({ status, onConnected }: Props) {
   };
 
   return (
-    <div className="page connect-page">
+    <div className={`page connect-page ${embedded ? "embedded" : ""}`}>
       <section className="card">
         <div className="card-head">
           <div>

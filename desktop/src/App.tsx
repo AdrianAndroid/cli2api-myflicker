@@ -6,6 +6,7 @@ import LogsPage from "./views/LogsPage";
 import SettingsPage from "./views/SettingsPage";
 import OverviewPage from "./views/OverviewPage";
 import ConnectPage from "./views/ConnectPage";
+import ConnectDrawer from "./views/ConnectDrawer";
 
 type Tab = "overview" | "tasks" | "chat" | "logs" | "settings" | "connect";
 type Role = "provider" | "client";
@@ -52,6 +53,9 @@ export default function App() {
   const [tab, setTab] = useState<Tab>(() => initialTab(true));
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(
+    () => new URLSearchParams(window.location.search).get("connect") === "1",
+  );
 
   useEffect(() => {
     let alive = true;
@@ -205,7 +209,25 @@ export default function App() {
 
       <div className={`main ${shownTab === "chat" ? "wide" : ""}`}>
         <header className="page-head">
-          <h1>{pendingConnect ? "连接 API 服务" : TITLES[shownTab]}</h1>
+          <div className="head-top">
+            <h1>{pendingConnect ? "连接 API 服务" : TITLES[shownTab]}</h1>
+            <button
+              className="head-gear"
+              title="连接与档案"
+              aria-label="连接与档案"
+              onClick={() => setDrawerOpen(true)}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path
+                  d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zM12 3l1.3 2.2 2.5-.4 1 2.3 2.2 1.2-.4 2.5L20.8 12l-2.2 1.2.4 2.5-2.2 1.2-1 2.3-2.5-.4L12 21l-1.3-2.2-2.5.4-1-2.3-2.2-1.2.4-2.5L3.2 12l2.2-1.2-.4-2.5 2.2-1.2 1-2.3 2.5.4z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
           <div className="subline">
             <span className={`dot ${connected ? "ok" : state === "error" ? "bad" : "idle"}`} />
             <span>{status?.profile?.name ?? status?.health?.identity?.label ?? "local"}</span>
@@ -237,6 +259,16 @@ export default function App() {
           {shownTab === "settings" && <SettingsPage status={status} />}
         </main>
       </div>
+
+      <ConnectDrawer
+        open={drawerOpen}
+        status={status}
+        onClose={() => setDrawerOpen(false)}
+        onConnected={(next) => {
+          setStatus(next);
+          setDrawerOpen(false);
+        }}
+      />
     </div>
   );
 }

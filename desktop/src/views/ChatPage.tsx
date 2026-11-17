@@ -191,6 +191,10 @@ export default function ChatPage({ status, offline = false }: Props) {
       const history = messagesRef.current
         .filter((msg) => msg.text.trim().length > 0)
         .map((msg) => ({ role: msg.role, content: msg.text }));
+      const resumeId = session.sessionId;
+      const bodyMessages = resumeId
+        ? [{ role: "user", content: text }]
+        : [...history, { role: "user", content: text }];
 
       const userMsg: ChatMsg = { id: uid(), role: "user", text, steps: [], status: "done" };
       const assistantMsg: ChatMsg = { id: uid(), role: "assistant", text: "", steps: [], status: "streaming" };
@@ -218,9 +222,10 @@ export default function ChatPage({ status, offline = false }: Props) {
       const response = await window.api.chatStart({
         requestId,
         body: {
-          messages: [...history, { role: "user", content: text }],
+          messages: bodyMessages,
           timeout: Number(timeoutSec) || 600,
           cwd: session.cwd || undefined,
+          session_id: resumeId || undefined,
         },
       });
       if (!response.ok) {
@@ -292,6 +297,17 @@ export default function ChatPage({ status, offline = false }: Props) {
       });
     }
     setEditingId(null);
+  };
+
+  const detachResume = () => {
+    if (!active) return;
+    setSessionState((prev) => {
+      if (prev.profileId !== profileId) return prev;
+      const sessions = prev.store.sessions.map((session) =>
+        session.id === active.id ? { ...session, sessionId: undefined } : session,
+      );
+      return { ...prev, store: { ...prev.store, sessions } };
+    });
   };
 
   const pickProject = (cwd: string) => {
@@ -393,6 +409,16 @@ export default function ChatPage({ status, offline = false }: Props) {
                 {projectLabel(active?.cwd)}
                 <span className="chev">▾</span>
               </button>
+              {active?.sessionId && (
+                <button
+                  className="session-chip"
+                  onClick={detachResume}
+                  title="正在续接该 agent 会话；点击断开，下一条将携带完整历史"
+                >
+                  续接 {active.sessionId.slice(0, 6)}
+                  <span className="chev">×</span>
+                </button>
+              )}
             </div>
             <span className="muted small mono ellipsis">经 /v1 调用 · {status?.baseUrl ?? ""}</span>
           </div>

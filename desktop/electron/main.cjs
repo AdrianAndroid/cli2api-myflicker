@@ -340,6 +340,7 @@ function createWindow() {
       project: process.env.MYFLICKER_DESKTOP_PROJECT || "",
       panel: process.env.MYFLICKER_DESKTOP_PANEL || "",
       browser: process.env.MYFLICKER_DESKTOP_BROWSER || "",
+      connect: process.env.MYFLICKER_DESKTOP_CONNECT || "",
     },
   });
 

@@ -58,6 +58,21 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 }
 
 .page-head { padding: 30px 4px 12px; -webkit-app-region: drag; }
+.head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.head-gear {
+  -webkit-app-region: no-drag;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  margin-top: 4px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fff;
+  color: var(--muted);
+}
+.head-gear:hover { color: var(--blue); border-color: rgba(10, 132, 255, 0.4); }
 .page-head h1 {
   margin: 0;
   font-size: 34px;
@@ -501,6 +516,20 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 .diff-add { color: #1e7f3c; background: #f0fbf4; }
 .diff-del { color: #a51f16; background: #fff5f4; }
 
+.session-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(52, 199, 89, 0.35);
+  background: #f0fbf4;
+  color: #1e7f3c;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+.session-chip:hover { background: #e4f7eb; }
+.session-chip .chev { font-size: 10px; color: #1e7f3c; }
+
 .project-chip {
   display: inline-flex;
   align-items: center;
@@ -514,6 +543,40 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; marg
 }
 .project-chip:hover { border-color: rgba(10, 132, 255, 0.4); color: var(--blue); }
 .project-chip .chev { font-size: 9px; color: var(--muted); }
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(15, 17, 21, 0.18);
+}
+.drawer {
+  width: 440px;
+  max-width: 92vw;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -20px 0 50px rgba(17, 18, 20, 0.16);
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 16px 10px;
+  -webkit-app-region: drag;
+}
+.drawer-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.drawer-head .icon-btn { -webkit-app-region: no-drag; }
+.drawer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 18px; }
+.connect-page.embedded { padding-bottom: 0; }
+.connect-page.embedded .kv-row { flex-wrap: wrap; }
+.connect-page.embedded .kv-row code { flex: 1 1 100%; order: 4; }
+.connect-page.embedded .kv-row .row-flex { order: 3; margin-left: auto; }
 
 .modal-backdrop {
   position: fixed;
