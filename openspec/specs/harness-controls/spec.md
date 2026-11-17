@@ -1,40 +1,9 @@
 # harness-controls Specification
 
 ## Purpose
-让每个 API key 拥有独立的 agent 执行策略（审批模式、工具白名单、MCP 注入），并把 myflicker 的会话与执行步骤暴露给调用方与聊天界面。
+让聊天界面通过公开的 /v1 接口查看 agent 的执行步骤与工具调用，并在切换页面或重启后保留对话记录。
 
 ## Requirements
-
-### Requirement: Per-Key Execution Policy
-
-网关 SHALL 允许为每个 key 配置审批模式与工具开关，并在启动 myflicker 时注入对应参数。
-
-#### Scenario: 只读用户
-
-- **WHEN** alice 的档案配置为 `plan` 且禁用写工具
-- **THEN** 该 key 的任务以 `--approval-mode plan --tools '{"write":false}'` 执行
-- **AND** 其他 key 的执行参数不受影响
-
-#### Scenario: 禁止提权
-
-- **WHEN** LAN 调用方在请求中试图指定 `yolo` 审批模式
-- **THEN** 网关拒绝该参数并回落到该 key 的配置值
-
-### Requirement: Session Continuity
-
-网关 SHALL 从一次运行中获取 myflicker 的 session id，并在后续请求提供该 id 时以 `-r <id>` 恢复同一会话。
-
-#### Scenario: 首次运行返回会话标识
-
-- **WHEN** alice 提交一个不带 session 的任务
-- **THEN** 任务状态中包含解析到的 `session_id`
-- **AND** 响应里可以看到该标识
-
-#### Scenario: 显式恢复
-
-- **WHEN** 调用方在提交时带上 `session_id`
-- **THEN** 网关以 `-r <session_id>` 执行该任务
-- **AND** 该会话只可能属于调用方自己的工作区
 
 ### Requirement: Execution Step Visibility
 
