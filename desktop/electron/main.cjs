@@ -11,6 +11,7 @@ const { LogBus } = require("./logs.cjs");
 const { ApiClient } = require("./api-client.cjs");
 const { ServiceManager } = require("./service-manager.cjs");
 const { SetupManager } = require("./setup.cjs");
+const { ProfileStore } = require("./profiles.cjs");
 
 const SECRET_KEYS = new Set(["API_KEY", "ADMIN_API_KEY"]);
 const MASK = "••••••••";
@@ -39,7 +40,8 @@ const envPath = path.join(dataDir, ".env");
 
 const logBus = new LogBus(dataDir);
 const envStore = new EnvStore(envPath);
-const api = new ApiClient(envStore);
+const profiles = new ProfileStore(dataDir, envStore);
+const api = new ApiClient(() => profiles.active());
 const setup = new SetupManager({ backendRoot, dataDir, logBus, envStore });
 const manager = new ServiceManager({ projectRoot: backendRoot, envStore, api, logBus, setup });
 
@@ -53,6 +55,8 @@ let win = null;
 let quitting = false;
 let setupCache = null;
 let setupProbedAt = 0;
+let clientHealth = null;
+let clientProbeTimer = null;
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -131,9 +135,72 @@ function mergeStatus(status, info) {
   return { ...status, setup: info };
 }
 
+/** True when the app should talk to a gateway it does not manage locally. */
+function remoteMode() {
+  const profile = profiles.active();
+  return profiles.state.role === "client" || profile?.kind === "remote";
+}
+
 async function currentStatus() {
+  const role = profiles.state.role;
+  const base = manager.getStatus();
+  const profile = profiles.active();
+  const masked = profiles.mask(profile);
+  const remote = remoteMode();
+  const onboarded = Boolean(profiles.state.onboarded);
+
+  if (remote) {
+    return {
+      ...base,
+      role,
+      profile: masked,
+      onboarded,
+      setup: null,
+      connected: Boolean(clientHealth),
+      baseUrl: api.base(),
+      port: api.port(),
+      state: clientHealth ? "running" : "stopped",
+      health: clientHealth,
+      queueDepth: clientHealth?.queue_depth ?? null,
+      workers: clientHealth?.worker?.online_workers ?? 0,
+      lastError: clientHealth ? null : "无法连接到 API 服务",
+    };
+  }
+
   const info = await refreshSetup();
-  return mergeStatus(manager.getStatus(), info);
+  return { ...mergeStatus(base, info), role, profile: masked, onboarded, connected: base.state === "running" };
+}
+
+function decorate(status) {
+  const role = profiles.state.role;
+  const remote = remoteMode();
+  return {
+    ...status,
+    role,
+    profile: profiles.mask(profiles.active()),
+    onboarded: Boolean(profiles.state.onboarded),
+    baseUrl: remote ? api.base() : status.baseUrl,
+    connected: remote ? Boolean(clientHealth) : status.state === "running",
+  };
+}
+
+async function probeClient() {
+  const response = await api.health();
+  clientHealth = response.ok ? response.data : null;
+  if (win && !win.isDestroyed()) {
+    win.webContents.send("status:update", decorate(await currentStatus()));
+  }
+}
+
+function ensureClientProbe() {
+  if (!remoteMode()) {
+    if (clientProbeTimer) clearInterval(clientProbeTimer);
+    clientProbeTimer = null;
+    return;
+  }
+  if (clientProbeTimer) return;
+  void probeClient();
+  clientProbeTimer = setInterval(() => void probeClient(), 3000);
 }
 
 /** Headless mode: capture runs must never steal focus from the user. */
@@ -168,7 +235,7 @@ function createWindow() {
 
   manager.on("status", (status) => {
     if (win && !win.isDestroyed()) {
-      win.webContents.send("status:update", mergeStatus(status, setupCache));
+      win.webContents.send("status:update", decorate(mergeStatus(status, setupCache)));
     }
   });
 
@@ -179,7 +246,16 @@ function createWindow() {
 
 // ---------------------------------------------------------------- service ---
 ipcMain.handle("status:get", () => currentStatus());
+function providerOnly() {
+  if (profiles.state.role !== "provider") {
+    return { ok: false, error: "当前为「连接使用」角色，无法控制本机服务" };
+  }
+  return null;
+}
+
 ipcMain.handle("service:start", async () => {
+  const denied = providerOnly();
+  if (denied) return { ...manager.getStatus(), ...denied };
   const started = await manager.start();
   const info = await refreshSetup(true);
   return mergeStatus(started, info);
@@ -189,6 +265,8 @@ ipcMain.handle("service:stop", async () => {
   return mergeStatus(stopped, setupCache);
 });
 ipcMain.handle("service:restart", async () => {
+  const denied = providerOnly();
+  if (denied) return { ...manager.getStatus(), ...denied };
   const restarted = await manager.restart();
   const info = await refreshSetup(true);
   return mergeStatus(restarted, info);
@@ -241,13 +319,13 @@ ipcMain.handle("chat:start", async (_event, payload) => {
 
   (async () => {
     try {
-      const response = await fetch(`http://127.0.0.1:${api.port()}/v1/chat/completions`, {
+      const response = await fetch(`${api.base()}/v1/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${api.taskKey()}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ model: "myflicker-agent", ...payload.body, stream: true, events: true }),
+        body: JSON.stringify({ model: api.model(), ...payload.body, stream: true, events: true }),
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
@@ -298,6 +376,59 @@ ipcMain.handle("chat:abort", (_event, requestId) => {
   return { ok: true };
 });
 
+// --------------------------------------------------------------- profiles ---
+ipcMain.handle("profiles:list", () => profiles.list());
+ipcMain.handle("profiles:upsert", (_event, input) => profiles.upsert(input || {}));
+ipcMain.handle("profiles:remove", (_event, id) => profiles.remove(id));
+ipcMain.handle("profiles:activate", async (_event, id) => {
+  const profile = profiles.activate(id);
+  ensureClientProbe();
+  if (remoteMode()) await probeClient();
+  return { profile, status: await currentStatus() };
+});
+ipcMain.handle("profiles:export", (_event, id) => profiles.exportLink(id || profiles.activeProfileId()));
+ipcMain.handle("profiles:import", (_event, link) => ProfileStore.parseLink(link));
+ipcMain.handle("profiles:probe", async (_event, input) => {
+  const baseUrl = String(input?.baseUrl || "").replace(/\/+$/, "");
+  const key = String(input?.key || "");
+  if (!/^https?:\/\//.test(baseUrl)) return { ok: false, error: "地址必须以 http:// 或 https:// 开头" };
+  const headers = { "X-API-Key": key };
+  try {
+    const health = await fetch(`${baseUrl}/api/myflicker/health`, {
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
+    const healthData = await health.json().catch(() => null);
+    if (!health.ok) {
+      return { ok: false, stage: "health", status: health.status, error: healthData?.error?.message || `HTTP ${health.status}` };
+    }
+    const models = await fetch(`${baseUrl}/v1/models`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!models.ok) {
+      return { ok: false, stage: "models", status: models.status, error: "鉴权失败或该服务未启用 /v1" };
+    }
+    const modelsData = await models.json().catch(() => null);
+    return {
+      ok: true,
+      health: healthData,
+      models: (modelsData?.data || []).map((item) => item.id),
+    };
+  } catch (error) {
+    return { ok: false, stage: "network", error: `${error.name}: ${error.message}` };
+  }
+});
+
+ipcMain.handle("app:role", async (_event, role) => {
+  if (role) {
+    profiles.setRole(role);
+    ensureClientProbe();
+    await refreshSetup(true).catch(() => null);
+  }
+  return currentStatus();
+});
+
 // ------------------------------------------------------------------- logs ---
 ipcMain.handle("logs:tail", (_event, source, cursor) => logBus.tail(source, Number(cursor) || 0));
 ipcMain.handle("logs:open", (_event, source) => shell.openPath(logBus.pathFor(source)));
@@ -333,9 +464,12 @@ ipcMain.handle("dialog:dir", async () => {
 // ------------------------------------------------------------------- app ----
 app.whenReady().then(async () => {
   if (HEADLESS && app.dock) app.dock.hide();
-  bootstrapEnv();
+  if (profiles.state.role === "provider") {
+    bootstrapEnv();
+    await refreshSetup(true).catch(() => null);
+  }
   createWindow();
-  await refreshSetup(true);
+  ensureClientProbe();
 
   const capturePath = process.env.MYFLICKER_DESKTOP_CAPTURE;
   if (capturePath) {
@@ -349,6 +483,26 @@ app.whenReady().then(async () => {
         await refreshSetup(true);
       }
       if (process.env.MYFLICKER_DESKTOP_AUTOSTART === "1") await manager.start();
+
+      // headless-only test hook: preload localStorage (e.g. seeded sessions)
+      const seedRaw = process.env.MYFLICKER_DESKTOP_STORAGE_SEED;
+      if (HEADLESS && seedRaw) {
+        try {
+          const seed = JSON.parse(seedRaw);
+          await new Promise((resolve) => {
+            if (win.webContents.isLoading()) win.webContents.once("did-finish-load", resolve);
+            else resolve();
+          });
+          await win.webContents.executeJavaScript(
+            `(() => { const seed = ${JSON.stringify(seed)}; for (const [k, v] of Object.entries(seed)) localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v)); })()`,
+          );
+          win.webContents.reload();
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } catch (error) {
+          console.error("[desktop] storage seed failed", error);
+        }
+      }
+
       const delayMs = Number(process.env.MYFLICKER_DESKTOP_CAPTURE_DELAY_MS || 3000);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       const image = await win.webContents.capturePage();

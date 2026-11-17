@@ -5,36 +5,51 @@ import ChatPage from "./views/ChatPage";
 import LogsPage from "./views/LogsPage";
 import SettingsPage from "./views/SettingsPage";
 import OverviewPage from "./views/OverviewPage";
+import ConnectPage from "./views/ConnectPage";
 
-type Tab = "overview" | "tasks" | "chat" | "logs" | "settings";
+type Tab = "overview" | "tasks" | "chat" | "logs" | "settings" | "connect";
+type Role = "provider" | "client";
 
-const TABS: Array<{ key: Tab; label: string; icon: string }> = [
-  { key: "overview", label: "总览", icon: "M3 13h4v8H3zM10 3h4v18h-4zM17 9h4v12h-4z" },
-  { key: "tasks", label: "任务", icon: "M4 6h16M4 12h16M4 18h10" },
-  { key: "chat", label: "聊天", icon: "M4 5h16v10H8l-4 4z" },
-  { key: "logs", label: "日志", icon: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" },
+const TABS: Array<{ key: Tab; label: string; icon: string; service?: boolean }> = [
+  { key: "overview", label: "服务", service: true, icon: "M3 13h4v8H3zM10 3h4v18h-4zM17 9h4v12h-4z" },
+  { key: "tasks", label: "任务", service: true, icon: "M4 6h16M4 12h16M4 18h10" },
+  { key: "chat", label: "工作区", icon: "M4 5h16v10H8l-4 4z" },
+  { key: "logs", label: "日志", service: true, icon: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" },
+  {
+    key: "connect",
+    label: "连接",
+    icon: "M9 17H7a5 5 0 0 1 0-10h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8",
+  },
   {
     key: "settings",
     label: "设置",
+    service: true,
     icon: "M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zM12 3l1.3 2.2 2.5-.4 1 2.3 2.2 1.2-.4 2.5L20.8 12l-2.2 1.2.4 2.5-2.2 1.2-1 2.3-2.5-.4L12 21l-1.3-2.2-2.5.4-1-2.3-2.2-1.2.4-2.5L3.2 12l2.2-1.2-.4-2.5 2.2-1.2 1-2.3 2.5.4z",
   },
 ];
 
 const TITLES: Record<Tab, string> = {
-  overview: "总览",
+  overview: "服务总览",
   tasks: "任务",
-  chat: "聊天",
+  chat: "工作区",
   logs: "日志",
+  connect: "连接与档案",
   settings: "设置",
 };
 
-function initialTab(): Tab {
+function tabsFor(serviceVisible: boolean) {
+  return TABS.filter((tab) => !tab.service || serviceVisible);
+}
+
+function initialTab(serviceVisible: boolean): Tab {
   const requested = new URLSearchParams(window.location.search).get("tab") as Tab | null;
-  return TABS.some((tab) => tab.key === requested) ? (requested as Tab) : "overview";
+  const allowed = tabsFor(serviceVisible);
+  if (requested && allowed.some((tab) => tab.key === requested)) return requested;
+  return serviceVisible ? "overview" : "chat";
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const [tab, setTab] = useState<Tab>(() => initialTab(true));
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -60,6 +75,28 @@ export default function App() {
     };
   }, []);
 
+  const role: Role = status?.role ?? "provider";
+  const profileKind = status?.profile?.kind ?? "local";
+  const serviceVisible = role === "provider" && profileKind === "local";
+  const connected = serviceVisible ? status?.state === "running" : Boolean(status?.connected);
+  const tabs = tabsFor(serviceVisible);
+  const activeTab: Tab = tabs.some((item) => item.key === tab) ? tab : tabs[0].key;
+  // a saved profile that is temporarily unreachable stays on the workspace
+  // (history is readable, input disabled) instead of bouncing to the form
+  const savedProfile = Boolean(status?.profile?.hasKey);
+  const pendingConnect = role === "client" && !connected && !savedProfile;
+  const shownTab: Tab = pendingConnect ? "connect" : activeTab;
+  const offline = !connected && savedProfile && (role === "client" || profileKind === "remote");
+
+  useEffect(() => {
+    if (!tabs.some((item) => item.key === tab)) setTab(tabs[0].key);
+  }, [role, profileKind]);
+
+  // switching between local and remote profiles lands on that role's home screen
+  useEffect(() => {
+    setTab(serviceVisible ? "overview" : "chat");
+  }, [serviceVisible]);
+
   const run = async (action: "start" | "stop" | "restart") => {
     setBusy(true);
     try {
@@ -70,76 +107,77 @@ export default function App() {
     }
   };
 
+  const pickRole = async (next: Role) => {
+    setBusy(true);
+    try {
+      setStatus(await window.api.setRole(next));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const state = status?.state ?? "stopped";
   const live = state === "running" || state === "starting";
 
+  if (status && status.onboarded === false) {
+    return (
+      <div className="shell">
+        <header className="page-head">
+          <h1>这台电脑用来做什么？</h1>
+          <div className="subline">
+            <span>首次启动选择一次，之后可在「连接」页随时切换</span>
+          </div>
+        </header>
+        <main className={`screen ${shownTab === "chat" ? "no-scroll" : ""}`}>
+          <div className="page">
+            <section className="card">
+              <div className="card-body">
+                <h2>提供服务</h2>
+                <p className="muted small">
+                  把本机 myflicker 变成 API：需要 Python 依赖与 Redis，会占用本机资源。
+                </p>
+                <button className="btn primary" disabled={busy} onClick={() => void pickRole("provider")}>
+                  用这台电脑提供服务
+                </button>
+              </div>
+            </section>
+            <section className="card">
+              <div className="card-body">
+                <h2>连接使用</h2>
+                <p className="muted small">
+                  连已经开好的 API：只需要地址 + Key，不需要本地依赖。
+                </p>
+                <button className="btn secondary" disabled={busy} onClick={() => void pickRole("client")}>
+                  连接已有的 API
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
-    <div className="shell">
-      <header className="page-head">
-        <h1>{TITLES[tab]}</h1>
-        <div className="subline">
-          <span className={`dot ${state === "running" ? "ok" : state === "error" ? "bad" : "idle"}`} />
-          <span>{status?.health?.identity?.label ?? "local"}</span>
-          <span className="dot-sep">·</span>
-          <span>{stateLabel(state)}</span>
-          {live && <span className="mono">· 队列 {status?.queueDepth ?? 0}</span>}
-        </div>
-      </header>
-
-      <main className="screen">
-        {tab === "overview" && (
-          <OverviewPage
-            status={status}
-            busy={busy}
-            onStart={() => void run("start")}
-            onStop={() => void run("stop")}
-            onRestart={() => void run("restart")}
+    <div className="shell app-shell">
+      <aside className="rail">
+        <div className="rail-top">
+          <span
+            className={`dot ${connected ? "ok" : state === "error" ? "bad" : "idle"}`}
+            title={connected ? "已连接" : serviceVisible ? stateLabel(state) : "未连接"}
           />
-        )}
-        {tab === "tasks" && <TasksPage status={status} />}
-        {/* chat stays mounted so switching tabs (or an in-flight stream) does not lose state */}
-        <div className={tab === "chat" ? "tab-pane" : "tab-pane hidden"}>
-          <ChatPage status={status} />
         </div>
-        {tab === "logs" && <LogsPage status={status} />}
-        {tab === "settings" && <SettingsPage status={status} />}
-      </main>
 
-      <footer className="dock">
-        <button
-          className="server-pill"
-          disabled={busy}
-          onClick={() => void run(live ? "stop" : "start")}
-        >
-          <span className="server-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-              <path
-                d="M4 7h16v4H4zM4 13h16v4H4z"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </span>
-          <span className="server-text">
-            <span className="server-name">myflicker · {stateLabel(state)}</span>
-            <span className="server-meta">
-              队列 {status?.queueDepth ?? 0} · worker {status?.workers ?? 0} ·{" "}
-              {busy ? "处理中…" : live ? "点击停止" : "点击启动"}
-            </span>
-          </span>
-          <span className="chevron">{live ? "停止" : "启动"}</span>
-        </button>
-
-        <nav className="tabbar">
-          {TABS.map((item) => (
+        <nav className="rail-nav">
+          {tabs.map((item) => (
             <button
               key={item.key}
-              className={`tab-item ${tab === item.key ? "active" : ""}`}
+              className={`rail-item ${shownTab === item.key ? "active" : ""}`}
+              title={item.label}
+              aria-label={item.label}
               onClick={() => setTab(item.key)}
             >
-              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true">
                 <path
                   d={item.icon}
                   fill="none"
@@ -153,7 +191,51 @@ export default function App() {
             </button>
           ))}
         </nav>
-      </footer>
+
+        <div className="rail-foot" title={role === "provider" ? "服务机" : "使用机"}>
+          {role === "provider" ? "服务" : "使用"}
+        </div>
+      </aside>
+
+      <div className="main">
+        <header className="page-head">
+          <h1>{pendingConnect ? "连接 API 服务" : TITLES[shownTab]}</h1>
+          <div className="subline">
+            <span className={`dot ${connected ? "ok" : state === "error" ? "bad" : "idle"}`} />
+            <span>{status?.profile?.name ?? status?.health?.identity?.label ?? "local"}</span>
+            <span className="dot-sep">·</span>
+            <span>{connected ? "已连接" : serviceVisible ? stateLabel(state) : "未连接"}</span>
+            {serviceVisible && live && <span className="mono">· 队列 {status?.queueDepth ?? 0}</span>}
+          </div>
+        </header>
+
+        <main className={`screen ${shownTab === "chat" ? "no-scroll" : ""}`}>
+          {offline && (
+            <div className="banner warn">
+              连接中断：历史消息仍可查看，发送已禁用。请到「连接」页检查地址与 Key。
+            </div>
+          )}
+          {shownTab === "connect" && <ConnectPage status={status} onConnected={setStatus} />}
+          {shownTab === "overview" && (
+            <OverviewPage
+              status={status}
+              busy={busy}
+              onStart={() => void run("start")}
+              onStop={() => void run("stop")}
+              onRestart={() => void run("restart")}
+            />
+          )}
+          {shownTab === "tasks" && <TasksPage status={status} />}
+          {/* chat stays mounted so switching pages (or an in-flight stream) does not lose state */}
+          {(role === "provider" || connected || savedProfile) && (
+            <div className={shownTab === "chat" ? "tab-pane" : "tab-pane hidden"}>
+              <ChatPage status={status} />
+            </div>
+          )}
+          {shownTab === "logs" && <LogsPage status={status} />}
+          {shownTab === "settings" && <SettingsPage status={status} />}
+        </main>
+      </div>
     </div>
   );
 }

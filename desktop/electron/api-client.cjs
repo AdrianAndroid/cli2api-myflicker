@@ -1,32 +1,53 @@
 "use strict";
 
 /**
- * The only place the desktop shell talks HTTP to the gateway.
- * Keys never leave the main process, so the renderer cannot leak them.
+ * The only place the desktop shell talks HTTP to a gateway.
+ *
+ * Which gateway is decided by a resolver (the active connection profile):
+ *   { baseUrl, key, adminKey?, model?, timeout? }
+ * The built-in profile resolves to the local service from .env; user profiles
+ * can point at another machine on the LAN. Keys never leave the main process.
  */
 class ApiClient {
-  constructor(envStore) {
-    this.envStore = envStore;
+  constructor(getProfile) {
+    this.getProfile = getProfile;
   }
 
-  env() {
-    return this.envStore.readAll();
-  }
-
-  port() {
-    return Number(this.env().API_PORT || 8000) || 8000;
+  profile() {
+    try {
+      return this.getProfile() || {};
+    } catch {
+      return {};
+    }
   }
 
   base() {
-    return `http://127.0.0.1:${this.port()}`;
+    const raw = this.profile().baseUrl || "http://127.0.0.1:8000";
+    return String(raw).replace(/\/+$/, "");
+  }
+
+  port() {
+    try {
+      return new URL(this.base()).port || "80";
+    } catch {
+      return "8000";
+    }
   }
 
   taskKey() {
-    return this.env().API_KEY || "";
+    return this.profile().key || "";
   }
 
   adminKey() {
-    return this.env().ADMIN_API_KEY || this.taskKey();
+    return this.profile().adminKey || this.taskKey();
+  }
+
+  model() {
+    return this.profile().model || "myflicker-agent";
+  }
+
+  timeout() {
+    return Number(this.profile().timeout) || 600;
   }
 
   async request(method, pathname, { body, admin = false, timeoutMs = 20000 } = {}) {
@@ -54,6 +75,10 @@ class ApiClient {
 
   health() {
     return this.request("GET", "/api/myflicker/health", { timeoutMs: 4000 });
+  }
+
+  models() {
+    return this.request("GET", "/v1/models", { timeoutMs: 4000 });
   }
 
   submit(payload) {

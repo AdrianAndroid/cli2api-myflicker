@@ -39,6 +39,16 @@ contextBridge.exposeInMainWorld("api", {
 
   netUrls: () => ipcRenderer.invoke("net:urls"),
 
+  getRole: () => ipcRenderer.invoke("app:role"),
+  setRole: (role) => ipcRenderer.invoke("app:role", role),
+  listProfiles: () => ipcRenderer.invoke("profiles:list"),
+  upsertProfile: (input) => ipcRenderer.invoke("profiles:upsert", input),
+  removeProfile: (id) => ipcRenderer.invoke("profiles:remove", id),
+  activateProfile: (id) => ipcRenderer.invoke("profiles:activate", id),
+  exportProfile: (id) => ipcRenderer.invoke("profiles:export", id),
+  importProfile: (link) => ipcRenderer.invoke("profiles:import", link),
+  probeProfile: (input) => ipcRenderer.invoke("profiles:probe", input),
+
   setupStatus: () => ipcRenderer.invoke("setup:status"),
   setupInit: () => ipcRenderer.invoke("setup:init"),
 });

@@ -47,6 +47,33 @@ export interface SetupInfo {
   error: string | null;
 }
 
+export interface Profile {
+  id: string;
+  name: string;
+  kind: "local" | "remote";
+  baseUrl: string;
+  model: string;
+  timeout: number;
+  hasKey?: boolean;
+  createdAt?: string;
+  builtin?: boolean;
+}
+
+export interface ProfileList {
+  role: "provider" | "client";
+  activeId: string;
+  profiles: Profile[];
+}
+
+export interface ProbeResult {
+  ok: boolean;
+  stage?: string;
+  status?: number;
+  error?: string;
+  models?: string[];
+  health?: { identity?: { label?: string }; worker?: { online_workers?: number } };
+}
+
 export interface ServiceStatus {
   state: "stopped" | "starting" | "running" | "stopping" | "error";
   mode: "owned" | "external" | null;
@@ -65,6 +92,10 @@ export interface ServiceStatus {
   uptimeMs: number;
   logs: { redis: string; worker: string; api: string };
   setup?: SetupInfo | null;
+  role?: "provider" | "client";
+  connected?: boolean;
+  onboarded?: boolean;
+  profile?: Profile | null;
 }
 
 export interface ApiResult<T = any> {
@@ -133,6 +164,16 @@ export interface Bridge {
   chatStart(payload: { requestId: string; body: Record<string, unknown> }): Promise<{ ok: boolean; requestId?: string; error?: string }>;
   chatAbort(requestId: string): Promise<{ ok: boolean }>;
   onChatEvent(callback: (event: ChatEvent) => void): () => void;
+  getRole(): Promise<ServiceStatus>;
+  setRole(role: "provider" | "client"): Promise<ServiceStatus>;
+  listProfiles(): Promise<ProfileList>;
+  upsertProfile(input: Record<string, unknown>): Promise<Profile>;
+  removeProfile(id: string): Promise<ProfileList>;
+  activateProfile(id: string): Promise<{ profile: Profile; status: ServiceStatus }>;
+  exportProfile(id?: string): Promise<string>;
+  importProfile(link: string): Promise<{ name: string; baseUrl: string; key: string }>;
+  probeProfile(input: { baseUrl: string; key: string }): Promise<ProbeResult>;
+
   setupStatus(): Promise<SetupInfo>;
   setupInit(): Promise<SetupInfo>;
 }

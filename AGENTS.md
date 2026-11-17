@@ -56,6 +56,10 @@ MYFLICKER_DESKTOP_CAPTURE_DELAY_MS=12000 \
 MYFLICKER_DESKTOP_SMOKE=1 \
 ./release/mac-arm64/myflicker.app/Contents/MacOS/myflicker
 
+# 可选：无头模式预置 localStorage（当前只用于会话列表截图）
+#   MYFLICKER_DESKTOP_STORAGE_SEED='{"myflicker.sessions.v1:local":{...}}'
+#   仅在 MYFLICKER_DESKTOP_CAPTURE 存在时生效
+
 # 3) 只跑后端（不涉及 UI）
 API_PORT=8010 REDIS_URL=redis://127.0.0.1:6379/8 \
 CELERY_BROKER_URL=redis://127.0.0.1:6379/9 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/10 \
