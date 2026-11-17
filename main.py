@@ -18,6 +18,7 @@ import ipaddress
 import json
 import logging
 import os
+import subprocess
 import re
 import secrets
 import shlex
@@ -468,6 +469,89 @@ def _normalize_env(raw: Optional[Dict[str, str]]) -> Dict[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# git helpers (read-only, sandboxed)
+# --------------------------------------------------------------------------- #
+def _git(repo: Path, args: List[str], timeout: float = 5.0) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.quotepath=false", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _sandboxed_repo(
+    identity: Identity, requested: Optional[str], client_ip: str
+) -> tuple:
+    """Resolve a workspace path and its git root, enforcing the sandbox."""
+    workspace = identity.ensure_workspace().resolve()
+    try:
+        target = resolve_cwd(identity, requested, client_ip).resolve()
+    except PermissionError as exc:
+        raise HTTPException(
+            403,
+            {
+                "code": "cwd_outside_workspace",
+                "message": str(exc),
+                "workspace": str(workspace),
+            },
+        )
+    if not target.is_dir():
+        raise HTTPException(
+            404, {"code": "invalid_cwd", "message": f"cwd does not exist: {target}"}
+        )
+
+    root_raw = _git(target, ["rev-parse", "--show-toplevel"])
+    if root_raw is None:
+        return workspace, target, None
+
+    repo = Path(root_raw.strip()).resolve()
+    if not within(repo, workspace) and sandbox_applies_to(client_ip) and not identity.is_admin:
+        raise HTTPException(
+            403,
+            {
+                "code": "repo_outside_workspace",
+                "message": f"repository '{repo}' is outside your workspace '{workspace}'",
+                "workspace": str(workspace),
+            },
+        )
+    return workspace, target, repo
+
+
+def _parse_git_status(raw: str) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    tokens = raw.split("\0")
+    index = 0
+    while index < len(tokens):
+        entry = tokens[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        code = entry[:2]
+        path = entry[3:]
+        items.append(
+            {
+                "path": path,
+                "status": code.strip() or "?",
+                "staged": code[0] not in (" ", "?"),
+                "untracked": code == "??",
+            }
+        )
+        if code[0] in ("R", "C") and index < len(tokens):
+            index += 1
+        if len(items) >= 500:
+            break
+    return items
+
+
+# --------------------------------------------------------------------------- #
 # endpoints
 # --------------------------------------------------------------------------- #
 @app.post("/api/myflicker/submit", status_code=202)
@@ -682,6 +766,75 @@ async def list_workspaces(
             "dirs": dirs,
         }
     )
+
+
+@app.get("/api/myflicker/changes")
+async def list_changes(
+    request: Request,
+    path: Optional[str] = None,
+    identity: Identity = Depends(verify_api_key),
+) -> JSONResponse:
+    """List working-tree changes for the caller's project (read-only)."""
+    client_ip = request.client.host if request.client else "unknown"
+    _, target, repo = _sandboxed_repo(identity, (path or "").strip() or None, client_ip)
+    if repo is None:
+        return JSONResponse({"git": False, "cwd": str(target), "files": []})
+
+    raw = _git(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]) or ""
+    return JSONResponse(
+        {
+            "git": True,
+            "cwd": str(target),
+            "root": str(repo),
+            "files": _parse_git_status(raw),
+        }
+    )
+
+
+@app.get("/api/myflicker/changes/diff")
+async def change_diff(
+    request: Request,
+    file: str,
+    path: Optional[str] = None,
+    identity: Identity = Depends(verify_api_key),
+) -> JSONResponse:
+    """Return a unified diff for one changed file (untracked files carry no text)."""
+    client_ip = request.client.host if request.client else "unknown"
+    _, target, repo = _sandboxed_repo(identity, (path or "").strip() or None, client_ip)
+    if repo is None:
+        raise HTTPException(
+            404,
+            {
+                "code": "not_a_repo",
+                "message": f"cwd is not inside a git repository: {target}",
+            },
+        )
+
+    rel = (file or "").strip()
+    if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        raise HTTPException(400, {"code": "invalid_file", "message": "invalid file path"})
+    if not within((repo / rel).resolve(), repo):
+        raise HTTPException(400, {"code": "invalid_file", "message": "file is outside the repository"})
+
+    diff = _git(repo, ["diff", "--no-color", "--unified=3", "HEAD", "--", rel], timeout=8)
+    if diff is None:
+        raise HTTPException(
+            400,
+            {
+                "code": "git_failed",
+                "message": "git diff failed (repository may have no commits yet)",
+            },
+        )
+
+    untracked = False
+    if not diff.strip():
+        status = _git(repo, ["status", "--porcelain=v1", "-z", "--", rel]) or ""
+        untracked = status.startswith("??")
+
+    if len(diff) > 200_000:
+        diff = diff[:200_000] + "\n… (truncated)"
+
+    return JSONResponse({"file": rel, "diff": diff, "untracked": untracked})
 
 
 @app.get("/api/myflicker/result/{task_id}")

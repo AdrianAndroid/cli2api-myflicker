@@ -231,6 +231,7 @@ function createWindow() {
       tab: process.env.MYFLICKER_DESKTOP_TAB || "",
       prompt: process.env.MYFLICKER_DESKTOP_CHAT_PROMPT || "",
       project: process.env.MYFLICKER_DESKTOP_PROJECT || "",
+      panel: process.env.MYFLICKER_DESKTOP_PANEL || "",
     },
   });
 
@@ -303,6 +304,30 @@ ipcMain.handle("tasks:result", (_event, taskId, includeEvents) =>
 );
 ipcMain.handle("tasks:list", (_event, limit) => api.listTasks(limit || 20));
 ipcMain.handle("tasks:cancel", (_event, taskId) => api.cancel(taskId));
+
+ipcMain.handle("changes:list", async (_event, path) => {
+  const response = await api.changes(String(path || ""));
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: response.data?.error?.message || response.error || `HTTP ${response.status}`,
+    };
+  }
+  return { ok: true, ...response.data };
+});
+
+ipcMain.handle("changes:diff", async (_event, path, file) => {
+  const response = await api.changeDiff(String(path || ""), String(file || ""));
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: response.data?.error?.message || response.error || `HTTP ${response.status}`,
+    };
+  }
+  return { ok: true, ...response.data };
+});
 
 ipcMain.handle("workspaces:list", async (_event, path) => {
   const response = await api.workspaces(String(path || ""));

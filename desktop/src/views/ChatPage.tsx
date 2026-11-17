@@ -13,6 +13,7 @@ import {
   uid,
 } from "../lib/sessions";
 import ProjectPicker from "./ProjectPicker";
+import RightPanel from "./RightPanel";
 
 interface Props {
   status: ServiceStatus | null;
@@ -39,6 +40,9 @@ export default function ChatPage({ status, offline = false }: Props) {
   const [draftTitle, setDraftTitle] = useState("");
   const [projectOpen, setProjectOpen] = useState(
     () => new URLSearchParams(window.location.search).get("project") === "1",
+  );
+  const [panelOpen, setPanelOpen] = useState(
+    () => new URLSearchParams(window.location.search).get("panel") === "1",
   );
 
   const messagesRef = useRef<ChatMsg[]>(messages);
@@ -315,7 +319,7 @@ export default function ChatPage({ status, offline = false }: Props) {
   const groups = groupSessions(store.sessions);
 
   return (
-    <div className="workspace">
+    <div className={`workspace ${panelOpen ? "with-panel" : ""}`}>
       <aside className="card session-pane">
         <header className="card-head tight">
           <div className="row-flex">
@@ -377,25 +381,30 @@ export default function ChatPage({ status, offline = false }: Props) {
       </aside>
 
       <section className="card chat-card">
-        <header className="card-head">
-          <div className="row-flex">
-            <h2>对话</h2>
-            <button
-              className="project-chip"
-              onClick={() => setProjectOpen(true)}
-              title={active?.cwd || "使用服务端默认目录"}
-            >
-              {projectLabel(active?.cwd)}
-              <span className="chev">▾</span>
-            </button>
-            <span className="muted small mono">经 /v1 调用 · {status?.baseUrl ?? ""}</span>
+        <header className="card-head chat-head">
+          <div className="chat-title">
+            <div className="row-flex">
+              <h2>对话</h2>
+              <button
+                className="project-chip"
+                onClick={() => setProjectOpen(true)}
+                title={active?.cwd || "使用服务端默认目录"}
+              >
+                {projectLabel(active?.cwd)}
+                <span className="chev">▾</span>
+              </button>
+            </div>
+            <span className="muted small mono ellipsis">经 /v1 调用 · {status?.baseUrl ?? ""}</span>
           </div>
-          <div className="row-flex">
+          <div className="row-flex chat-actions">
+            <button className="btn small ghost" onClick={() => setPanelOpen((value) => !value)}>
+              {panelOpen ? "收起" : "变更"}
+            </button>
             <label className="check">
               超时
               <input
                 className="input"
-                style={{ width: 62, padding: "4px 8px" }}
+                style={{ width: 56, padding: "4px 8px" }}
                 value={timeoutSec}
                 onChange={(event) => setTimeoutSec(event.target.value)}
               />
@@ -467,6 +476,8 @@ export default function ChatPage({ status, offline = false }: Props) {
           </div>
         </div>
       </section>
+
+      <RightPanel open={panelOpen} cwd={active?.cwd} onClose={() => setPanelOpen(false)} />
 
       <ProjectPicker
         open={projectOpen}

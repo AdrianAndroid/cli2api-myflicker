@@ -80,6 +80,32 @@ export interface WorkspaceListing {
   error?: string;
 }
 
+export interface ChangeFile {
+  path: string;
+  status: string;
+  staged: boolean;
+  untracked: boolean;
+}
+
+export interface ChangesListing {
+  ok: boolean;
+  git?: boolean;
+  cwd?: string;
+  root?: string;
+  files?: ChangeFile[];
+  status?: number;
+  error?: string;
+}
+
+export interface ChangeDiff {
+  ok: boolean;
+  file?: string;
+  diff?: string;
+  untracked?: boolean;
+  status?: number;
+  error?: string;
+}
+
 export interface ProbeResult {
   ok: boolean;
   stage?: string;
@@ -176,6 +202,8 @@ export interface Bridge {
   openPath(target: string): Promise<string>;
   netUrls(): Promise<Array<{ iface: string; url: string }>>;
   listWorkspaces(path?: string): Promise<WorkspaceListing>;
+  listChanges(path?: string): Promise<ChangesListing>;
+  changeDiff(path: string | undefined, file: string): Promise<ChangeDiff>;
 
   chatStart(payload: { requestId: string; body: Record<string, unknown> }): Promise<{ ok: boolean; requestId?: string; error?: string }>;
   chatAbort(requestId: string): Promise<{ ok: boolean }>;

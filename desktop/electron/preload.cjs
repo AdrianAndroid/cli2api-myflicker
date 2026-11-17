@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld("api", {
 
   netUrls: () => ipcRenderer.invoke("net:urls"),
   listWorkspaces: (path) => ipcRenderer.invoke("workspaces:list", path),
+  listChanges: (path) => ipcRenderer.invoke("changes:list", path),
+  changeDiff: (path, file) => ipcRenderer.invoke("changes:diff", path, file),
 
   getRole: () => ipcRenderer.invoke("app:role"),
   setRole: (role) => ipcRenderer.invoke("app:role", role),

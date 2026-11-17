@@ -95,6 +95,18 @@ class ApiClient {
     return this.request("GET", `/api/myflicker/workspaces${query}`, { timeoutMs: 8000 });
   }
 
+  changes(path = "") {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request("GET", `/api/myflicker/changes${query}`, { timeoutMs: 8000 });
+  }
+
+  changeDiff(path, file) {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (file) params.set("file", file);
+    return this.request("GET", `/api/myflicker/changes/diff?${params.toString()}`, { timeoutMs: 10000 });
+  }
+
   listTasks(limit = 20) {
     return this.request("GET", `/api/myflicker/tasks?limit=${limit}`, { admin: true });
   }

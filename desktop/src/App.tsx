@@ -197,7 +197,7 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="main">
+      <div className={`main ${shownTab === "chat" ? "wide" : ""}`}>
         <header className="page-head">
           <h1>{pendingConnect ? "连接 API 服务" : TITLES[shownTab]}</h1>
           <div className="subline">
