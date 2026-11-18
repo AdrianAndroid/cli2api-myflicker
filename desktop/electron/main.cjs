@@ -12,6 +12,8 @@ const { ApiClient } = require("./api-client.cjs");
 const { ServiceManager } = require("./service-manager.cjs");
 const { SetupManager } = require("./setup.cjs");
 const { ProfileStore } = require("./profiles.cjs");
+const { clientKeysFromEnv } = require("./client-keys.cjs");
+const claudeConfig = require("./claude-config.cjs");
 
 const SECRET_KEYS = new Set(["API_KEY", "ADMIN_API_KEY"]);
 const MASK = "••••••••";
@@ -611,6 +613,13 @@ ipcMain.handle("shell:open", (_event, target) => shell.openPath(target));
 
 // -------------------------------------------------------------------- env ---
 ipcMain.handle("env:read", () => ({ masked: maskEnv(envStore.readAll()), path: envStore.envPath }));
+ipcMain.handle("claude:status", () => claudeConfig.status(envStore.readAll()));
+ipcMain.handle("claude:configure", () => claudeConfig.configure(envStore.readAll()));
+ipcMain.handle("claude:restore", () => claudeConfig.restore(envStore.readAll()));
+ipcMain.handle("env:client-keys", () => ({
+  path: envStore.envPath,
+  keys: clientKeysFromEnv(envStore.readAll()),
+}));
 ipcMain.handle("env:save", (_event, patch) => {
   const safePatch = {};
   for (const [key, value] of Object.entries(patch || {})) {

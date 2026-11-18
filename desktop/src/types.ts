@@ -125,6 +125,18 @@ export interface ProbeResult {
   health?: { identity?: { label?: string }; worker?: { online_workers?: number } };
 }
 
+export interface ClaudeCodeStatus {
+  path: string;
+  exists: boolean;
+  validJson: boolean;
+  baseUrl: string;
+  tokenMasked: string;
+  localUrl: string;
+  pointsToLocal: boolean;
+  backupPath: string;
+  restoredFrom?: string;
+}
+
 export interface ServiceStatus {
   state: "stopped" | "starting" | "running" | "stopping" | "error";
   mode: "owned" | "external" | null;
@@ -205,6 +217,13 @@ export interface Bridge {
   tailLogs(source: string, cursor: number): Promise<{ lines: string[]; cursor: number; truncated?: boolean }>;
   openLog(source: string): Promise<string>;
   readEnv(): Promise<{ masked: Record<string, string>; path: string }>;
+  clientKeys(): Promise<{
+    path: string;
+    keys: Array<{ label: string; key: string; source: string }>;
+  }>;
+  claudeStatus(): Promise<ClaudeCodeStatus>;
+  claudeConfigure(): Promise<ClaudeCodeStatus>;
+  claudeRestore(): Promise<ClaudeCodeStatus>;
   saveEnv(patch: Record<string, string>): Promise<{ masked: Record<string, string>; path: string }>;
   rotateKey(key: string): Promise<{ key: string; value: string; masked: Record<string, string> }>;
   pickFile(): Promise<string | null>;

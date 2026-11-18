@@ -39,6 +39,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from identity import Identity, load_identities, resolve_cwd, resolve_key, sandbox_applies_to, within, workspace_root
 from openai_api import router as openai_router
+from anthropic_api import router as anthropic_router
 from celery_tasks import (
     CELERY_QUEUE,
     DEFAULT_TIMEOUT,
@@ -57,6 +58,7 @@ from celery_tasks import (
     log_event,
     run_myflicker,
     save_task_state,
+    start_log_maintenance,
     update_task_state,
     utcnow_iso,
 )
@@ -128,11 +130,13 @@ app = FastAPI(
 
 
 app.include_router(openai_router)
+app.include_router(anthropic_router)
 
 
 @app.on_event("startup")
 def _on_startup() -> None:
     ensure_log_dirs()
+    start_log_maintenance()
     logger.info(
         "gateway starting | bin=%s | cwd=%s | queue=%s | redis=%s | logs=%s | bind=%s:%s | allowed_cidrs=%s | rate_limit=%s/min | max_queue_depth=%s",
         MYFLICKER_BIN,

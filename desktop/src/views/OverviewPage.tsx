@@ -10,9 +10,56 @@ interface Props {
   busy: boolean;
 }
 
+interface ClientKey {
+  label: string;
+  key: string;
+  source: string;
+}
+
 export default function OverviewPage({ status, onStart, onStop, onRestart, busy }: Props) {
   const [recent, setRecent] = useState<TaskRow[]>([]);
+  const [clientKeys, setClientKeys] = useState<ClientKey[]>([]);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
   const running = status?.state === "running";
+
+  useEffect(() => {
+    let alive = true;
+    window.api
+      .clientKeys()
+      .then((result) => {
+        if (alive) setClientKeys(result.keys);
+      })
+      .catch((err) => {
+        if (alive) setKeyError(String(err));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [status?.state]);
+
+  const copyKey = async (key: string) => {
+    try {
+      await navigator.clipboard.writeText(key);
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = key;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(area);
+      if (!ok) {
+        setKeyError("复制失败，请手动选择文本");
+        return;
+      }
+    }
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((current) => (current === key ? null : current));
+    }, 2000);
+  };
 
   useEffect(() => {
     if (!running) {
@@ -91,6 +138,31 @@ export default function OverviewPage({ status, onStart, onStop, onRestart, busy 
             )}
           </div>
         </div>
+      </section>
+
+      <div className="section-label">客户端 Key</div>
+      <section className="card list-card">
+        {keyError && <div className="banner error">{keyError}</div>}
+        {clientKeys.length === 0 && (
+          <div className="list-row">
+            <span className="muted">
+              {keyError ? "读取 Key 失败" : "未配置客户端 key（可在设置页查看或轮换）"}
+            </span>
+          </div>
+        )}
+        {clientKeys.map((item) => (
+          <div className="list-row" key={`${item.source}:${item.label}`}>
+            <div className="list-main">
+              <span className="muted small">{item.label}</span>
+              <span className="mono small key-text">{item.key}</span>
+            </div>
+            <div className="list-side">
+              <button className="btn secondary small" onClick={() => void copyKey(item.key)}>
+                {copiedKey === item.key ? "已复制" : "复制"}
+              </button>
+            </div>
+          </div>
+        ))}
       </section>
 
       <div className="section-label">当前最繁忙</div>

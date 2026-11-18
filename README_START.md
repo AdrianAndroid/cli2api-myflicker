@@ -297,8 +297,9 @@ PROJECT  ...
 | --- | --- |
 | `logs/myflicker_tasks.jsonl` | **统一全链路日志**，所有任务的所有事件按时间追加，一行一个 JSON |
 | `logs/tasks/<task_id>.jsonl` | **单任务独立日志**，同一事件流，只含该 task_id |
-| `logs/tasks/<task_id>.stdout.txt` | 该次运行的完整 stdout（不截断） |
-| `logs/tasks/<task_id>.stderr.txt` | 该次运行的完整 stderr（不截断） |
+| `logs/tasks/<task_id>.stdout.txt` | 该次运行的 stdout（按 `MAX_OUTPUT_CHARS` 截断） |
+| `logs/tasks/<task_id>.stderr.txt` | 该次运行的 stderr（按 `MAX_OUTPUT_CHARS` 截断） |
+| `logs/tasks/<task_id>.events.jsonl` | 可选：agent 结构化事件（仅在 `ANTHROPIC_TRACE_EVENTS=1` 时生成） |
 | worker / uvicorn 的 stdout | 同一份事件的纯文本版本（`logging` 输出） |
 
 JSONL 每行字段：`ts`(UTC ISO8601)、`level`、`event`、`task_id`、`pid`、`host`，外加该事件特有字段。
@@ -314,15 +315,34 @@ JSONL 每行字段：`ts`(UTC ISO8601)、`level`、`event`、`task_id`、`pid`�
 | `process.timeout` | 命中 subprocess 超时并杀进程组 | `pid`, `timeout`, `reason` |
 | `process.stdout` / `process.stderr` | 每次运行结束落盘输出 | `bytes`, `content`(截断), `file` |
 | `task.finished` | 汇总 | `status`, `returncode`, `timed_out`, `duration_ms`, `error`, `cmdline`, `cwd` |
+| `request.accepted` | `/v1/messages` 提交成功后 | `request_id`, `model`, `stream`, `session_id`, `cwd`, `prompt_len`, `prompt_sha256`, `prompt_preview`(≤512) |
+| `request.finished` | 请求结束（流式为 SSE 结束后） | `request_id`, `status`, `duration_ms`, `http_status` |
 
-查看：
+按一次请求排查（`X-Request-Id` 响应头与任务状态里的 `request_id` 相同）：
 
 ```bash
-tail -f logs/myflicker_tasks.jsonl | python3 -m json.tool --json-lines
-cat logs/tasks/<task_id>.jsonl | python3 -m json.tool --json-lines
+grep '"request_id": "<request_id>"' logs/myflicker_tasks.jsonl | python3 -m json.tool --json-lines
 ```
 
 日志写入失败不会中断任务（写入被 try/except 包裹，只会在 worker stdout 报错）。
+
+### 7.1 日志体积与保留
+
+日志按批写入（默认 0.5s 或 64 条刷新）并在启动时、之后每小时清理；单文件超限轮转为 `.1`…`.N`。
+
+```bash
+# .env（均有默认值，可不配）
+LOG_MAX_BYTES=20971520          # 单文件 20MB 触发轮转
+LOG_BACKUPS=5                   # 每个日志保留 5 份 .1-.5
+LOG_RETENTION_DAYS=7            # 超过 7 天的任务日志删除
+LOG_DIR_MAX_BYTES=524288000     # logs/ 总量上限 500MB，超出从最旧删
+MAX_OUTPUT_CHARS=200000         # stdout/stderr 落盘截断长度
+ANTHROPIC_TRACE_EVENTS=0        # 1=把工具事件写入 .events.jsonl
+AGENT_TRACE_MAX_EVENTS=5000     # 单任务事件条数上限
+AGENT_TRACE_MAX_BYTES=5242880   # 单任务事件文件字节上限
+```
+
+桌面端进程日志同样轮转（`MYFLICKER_DESKTOP_LOG_MAX_BYTES` / `_BACKUPS` / `_RETENTION_DAYS` 可覆盖，默认 20MB × 5、7 天）。
 
 ## 8. DeepSeek Harness（Agent）接入逻辑
 
@@ -487,7 +507,7 @@ npm start            # 启动桌面应用
 
 | 页面 | 能做什么 |
 | --- | --- |
-| 总览 | 队列 / 在线 worker / 运行时长三项大号指标，当前最繁忙任务，身份与局域网卡片，最近任务 |
+| 总览 | 队列 / 在线 worker / 运行时长三项大号指标，客户端 Key 明文列表（可一键复制），当前最繁忙任务，身份与局域网卡片，最近任务 |
 | 任务 | 提交任务（args 逐项、timeout、cwd、env），列表实时刷新，查看 stdout/stderr/事件链，取消排队任务 |
 | 聊天 | 用自然语言行（其实是 myflicker 参数）连续测试，`/timeout`、`/cwd`、`/env K=V` 会话级指令 |
 | 日志 | worker/api/redis 实时输出，关键字过滤、暂停、打开日志文件 |
@@ -496,6 +516,10 @@ npm start            # 启动桌面应用
 启动顺序由主进程状态机控制：`Redis → FastAPI → Worker(--concurrency=1) → /health 自检`；
 停止顺序反向，Worker 给 10s 优雅退出，超时对**整个进程组** SIGKILL。
 已经手动起了服务时会自动「复用」而不是重复拉起（避免双 worker 破坏串行）。
+
+「服务」页的「客户端 Key」卡片始终明文展示 `.env` 中所有生效的客户端 key（`API_KEY` 或 `API_KEYS` 的每条，含 label），可直接复制给 Claude Code 等客户端；`ADMIN_API_KEY` 不在此展示，其余页面仍为掩码。
+
+「连接」页的「Claude Code 接入」卡片可一键把本机地址与 key 写入 `~/.claude/settings.json`（自动生成 `settings.json.myflicker-backup-<时间戳>` 备份，支持「恢复上次备份」）；写入后重启 Claude Code 生效。该操作会覆盖 Claude Code `env` 里原有的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`，请按需恢复。
 
 调试与打包：
 
@@ -616,6 +640,42 @@ print(resp.choices[0].message.content)
 - 失败时 `finish_reason` 为 `error`，内容里带 `[myflicker failed: …]` 与 stderr，HTTP 仍返回 200（符合 OpenAI 客户端预期）；请求本身不合法才返回 4xx，鉴权失败返回 401 且是 OpenAI 错误结构。
 
 不支持的（明确说清楚，避免误判）：`tools/function calling`、`response_format`、图片/音频多模态输入、`logprobs`、`n>1`、`temperature` 等采样参数（CLI 不接受这些概念，传了也不生效）。
+
+### 13.1 Claude Code 直连（Anthropic Messages 协议）
+
+网关同时提供 Anthropic 兼容面 `POST /v1/messages` 与 `POST /v1/messages/count_tokens`，Claude Code 无需转换器：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
+export ANTHROPIC_AUTH_TOKEN=<API_KEY>      # 网关按 x-api-key 校验
+claude                                       # 之后正常对话即可
+```
+
+最小自测：
+
+```bash
+curl -s -X POST $BASE/v1/messages \
+  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+与 OpenAI 面的差异：
+
+| 能力 | 行为 |
+| --- | --- |
+| `system` | 并入 prompt 头部（`System: …`），不会丢指令 |
+| `tools` / `tool_use` / `tool_result` | 工具块线性化为文本并入 prompt；网关**不返回** `tool_use` 内容块，工具由 myflicker 自己执行，没有客户端回环 |
+| `stream: true` | Anthropic SSE：`message_start` → `content_block_start` → `content_block_delta` → `content_block_stop` → `message_delta` → `message_stop` |
+| `model` | 原样回显，不参与路由（所有名字都映射到本机 myflicker） |
+| `max_tokens` / `temperature` | 接受但忽略（CLI 无此概念） |
+| `usage` | `input_tokens` / `output_tokens` 均为字符数估算值 |
+| `count_tokens` | 本地估算，不入队、不消耗任务 |
+| 会话续接 | 传扩展字段 `session_id` 时只发最后一条 user 消息，并以 `--resume` 续接本 key 工作目录下的会话 |
+| 工作目录 | 自动读取 system prompt 的 `Primary working directory:`（或 `Working directory:`）作为 cwd；`X-Myflicker-Cwd` 头可覆盖；识别不到才用该 key 的 workspace |
+
+工作目录的优先级是：请求体 `cwd` → 请求头 `X-Myflicker-Cwd` → system prompt 中的项目路径 → 该 key 的 workspace。只接受已存在的绝对目录，不会自动创建；非回环客户端若识别到 workspace 之外的目录会回退 workspace，不会报错。`request.accepted` 日志里的 `cwd_source`（`body` / `header` / `prompt` / `workspace`）可确认实际来源。
+
+其余（鉴权、队列、串行、隔离、错误码）与 `/v1/chat/completions` 完全一致：每个 key 一条串行通道，同目录串行、跨目录并行。
 
 ## 14. 多人共享 / 局域网：上下文如何隔离
 

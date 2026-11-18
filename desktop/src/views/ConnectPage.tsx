@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ProbeResult, Profile, ProfileList, ServiceStatus } from "../types";
+import type { ClaudeCodeStatus, ProbeResult, Profile, ProfileList, ServiceStatus } from "../types";
 
 interface Props {
   status: ServiceStatus | null;
@@ -18,6 +18,10 @@ export default function ConnectPage({ status, onConnected, embedded = false }: P
   const [busy, setBusy] = useState<"probe" | "save" | "role" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [claude, setClaude] = useState<ClaudeCodeStatus | null>(null);
+  const [claudeBusy, setClaudeBusy] = useState<"configure" | "restore" | null>(null);
+  const [claudeError, setClaudeError] = useState<string | null>(null);
+  const [claudeNotice, setClaudeNotice] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setList(await window.api.listProfiles());
@@ -26,6 +30,52 @@ export default function ConnectPage({ status, onConnected, embedded = false }: P
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    let alive = true;
+    window.api
+      .claudeStatus()
+      .then((next) => {
+        if (alive) setClaude(next);
+      })
+      .catch((err) => {
+        if (alive) setClaudeError(String(err).replace(/^Error: /, ""));
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const configureClaude = async () => {
+    setClaudeError(null);
+    setClaudeNotice(null);
+    setClaudeBusy("configure");
+    try {
+      const next = await window.api.claudeConfigure();
+      setClaude(next);
+      const backup = next.backupPath ? `，已备份 ${next.backupPath.split("/").pop()}` : "";
+      setClaudeNotice(`已写入 ${next.path}${backup}；重启 Claude Code 后生效`);
+    } catch (err) {
+      setClaudeError(String(err).replace(/^Error: /, ""));
+    } finally {
+      setClaudeBusy(null);
+    }
+  };
+
+  const restoreClaude = async () => {
+    setClaudeError(null);
+    setClaudeNotice(null);
+    setClaudeBusy("restore");
+    try {
+      const next = await window.api.claudeRestore();
+      setClaude(next);
+      setClaudeNotice(`已恢复 ${next.restoredFrom?.split("/").pop() ?? "备份"}；重启 Claude Code 后生效`);
+    } catch (err) {
+      setClaudeError(String(err).replace(/^Error: /, ""));
+    } finally {
+      setClaudeBusy(null);
+    }
+  };
 
   const role = list?.role ?? status?.role ?? "provider";
 
@@ -154,6 +204,51 @@ export default function ConnectPage({ status, onConnected, embedded = false }: P
               {role === "provider" ? "启动本机服务并分享 Key" : "只填地址和 Key，不需要本地依赖"}
             </span>
           </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <div>
+            <h2>Claude Code 接入</h2>
+            <span className="muted small">写入本机地址与 key，自动备份原配置</span>
+          </div>
+        </div>
+        <div className="card-body">
+          {claudeError && <div className="banner error">{claudeError}</div>}
+          {claudeNotice && <div className="banner">{claudeNotice}</div>}
+          <div className="kv-row">
+            <span className="muted small kv-tag">配置文件</span>
+            <code className="mono ellipsis">{claude?.path || "—"}</code>
+          </div>
+          <div className="kv-row">
+            <span className="muted small kv-tag">当前地址</span>
+            <code className="mono ellipsis">{claude?.baseUrl || "未配置"}</code>
+          </div>
+          <div className="kv-row">
+            <span className="muted small kv-tag">Token</span>
+            <code className="mono">{claude?.tokenMasked || "未配置"}</code>
+            <span className={claude?.pointsToLocal ? "text-ok small" : "muted small"}>
+              {claude?.pointsToLocal ? "已指向本机" : `将写入 ${claude?.localUrl || "—"}`}
+            </span>
+          </div>
+          <div className="btn-row">
+            <button
+              className="btn primary"
+              disabled={claudeBusy !== null}
+              onClick={() => void configureClaude()}
+            >
+              {claudeBusy === "configure" ? "写入中…" : "配置 Claude Code"}
+            </button>
+            <button
+              className="btn secondary"
+              disabled={claudeBusy !== null || !claude?.backupPath}
+              onClick={() => void restoreClaude()}
+            >
+              {claudeBusy === "restore" ? "恢复中…" : "恢复上次备份"}
+            </button>
+          </div>
+          <span className="muted small">写入后重启 Claude Code 生效；备份文件与 settings.json 同目录。</span>
         </div>
       </section>
 

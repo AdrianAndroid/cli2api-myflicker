@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld("api", {
   openLog: (source) => ipcRenderer.invoke("logs:open", source),
 
   readEnv: () => ipcRenderer.invoke("env:read"),
+  clientKeys: () => ipcRenderer.invoke("env:client-keys"),
+  claudeStatus: () => ipcRenderer.invoke("claude:status"),
+  claudeConfigure: () => ipcRenderer.invoke("claude:configure"),
+  claudeRestore: () => ipcRenderer.invoke("claude:restore"),
   saveEnv: (patch) => ipcRenderer.invoke("env:save", patch),
   rotateKey: (key) => ipcRenderer.invoke("env:rotate", key),
 

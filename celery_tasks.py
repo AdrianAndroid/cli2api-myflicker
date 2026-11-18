@@ -10,6 +10,7 @@ Start the worker with:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -93,6 +94,12 @@ CELERY_QUEUE: str = _env_str("CELERY_QUEUE", "myflicker")
 TASK_KEY_PREFIX: str = _env_str("TASK_KEY_PREFIX", "myflicker:task")
 RESULT_TTL: int = _env_int("RESULT_TTL", 86400)
 MAX_OUTPUT_CHARS: int = _env_int("MAX_OUTPUT_CHARS", 200_000)
+LOG_MAX_BYTES: int = _env_int("LOG_MAX_BYTES", 20 * 1024 * 1024)
+LOG_BACKUPS: int = _env_int("LOG_BACKUPS", 5)
+LOG_RETENTION_DAYS: float = _env_float("LOG_RETENTION_DAYS", 7.0)
+LOG_DIR_MAX_BYTES: int = _env_int("LOG_DIR_MAX_BYTES", 500 * 1024 * 1024)
+AGENT_TRACE_MAX_EVENTS: int = _env_int("AGENT_TRACE_MAX_EVENTS", 5000)
+AGENT_TRACE_MAX_BYTES: int = _env_int("AGENT_TRACE_MAX_BYTES", 5 * 1024 * 1024)
 LOG_DIR: Path = Path(_env_str("LOG_DIR", "logs")).expanduser()
 if not LOG_DIR.is_absolute():
     LOG_DIR = (BASE_DIR / LOG_DIR).resolve()
@@ -260,6 +267,112 @@ def update_task_state(
 # --------------------------------------------------------------------------- #
 # helpers: logging (stdout + jsonl file, per task file AND unified file)
 # --------------------------------------------------------------------------- #
+_WRITE_LOCK = threading.Lock()
+_LOG_BUFFER: Dict[Path, List[str]] = {}
+_LOG_BUFFER_BYTES: Dict[Path, int] = {}
+_LOG_ROTATE_CHECKED: Dict[Path, float] = {}
+_LOG_FLUSH_INTERVAL = 0.5
+_LOG_FLUSH_THRESHOLD = 64
+_LOG_FLUSH_BYTES = 1_000_000
+_log_flusher_started = False
+
+
+def _rotate_if_needed(path: Path) -> None:
+    now = time.monotonic()
+    if now - _LOG_ROTATE_CHECKED.get(path, 0.0) < 2.0:
+        return
+    _LOG_ROTATE_CHECKED[path] = now
+    try:
+        if path.stat().st_size < LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    for index in range(LOG_BACKUPS - 1, 0, -1):
+        source = Path(f"{path}.{index}")
+        target = Path(f"{path}.{index + 1}")
+        if source.exists():
+            try:
+                source.replace(target)
+            except OSError:
+                pass
+    try:
+        path.replace(Path(f"{path}.1"))
+    except OSError:
+        pass
+
+
+def _flush_path(path: Path) -> None:
+    with _WRITE_LOCK:
+        lines = _LOG_BUFFER.get(path)
+        if not lines:
+            _LOG_BUFFER.pop(path, None)
+            _LOG_BUFFER_BYTES.pop(path, None)
+            return
+        payload = "\n".join(lines) + "\n"
+        _LOG_BUFFER[path] = []
+        _LOG_BUFFER_BYTES[path] = 0
+    try:
+        ensure_log_dirs()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed(path)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(payload)
+    except OSError as exc:
+        logger.error("failed to write log %s: %s", path, exc)
+
+
+def _buffer_line(path: Path, line: str, urgent: bool = False) -> None:
+    with _WRITE_LOCK:
+        lines = _LOG_BUFFER.setdefault(path, [])
+        lines.append(line)
+        size = _LOG_BUFFER_BYTES.get(path, 0) + len(line.encode("utf-8", "ignore"))
+        _LOG_BUFFER_BYTES[path] = size
+        should_flush = urgent or len(lines) >= _LOG_FLUSH_THRESHOLD or size >= _LOG_FLUSH_BYTES
+        if should_flush:
+            _LOG_BUFFER.pop(path, None)
+            _LOG_BUFFER_BYTES.pop(path, None)
+            payload = "\n".join(lines) + "\n"
+    if not should_flush:
+        _ensure_flusher()
+        return
+    try:
+        ensure_log_dirs()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed(path)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(payload)
+    except OSError as exc:
+        logger.error("failed to write log %s: %s", path, exc)
+    _ensure_flusher()
+
+
+def flush_logs() -> None:
+    with _WRITE_LOCK:
+        paths = list(_LOG_BUFFER.keys())
+    for path in paths:
+        _flush_path(path)
+
+
+def _ensure_flusher() -> None:
+    global _log_flusher_started
+    if _log_flusher_started:
+        return
+    with _WRITE_LOCK:
+        if _log_flusher_started:
+            return
+        _log_flusher_started = True
+
+    def loop() -> None:
+        while True:
+            time.sleep(_LOG_FLUSH_INTERVAL)
+            try:
+                flush_logs()
+            except Exception:  # noqa: BLE001 - the flusher must never die
+                pass
+
+    threading.Thread(target=loop, name="log-flusher", daemon=True).start()
+
+
 def log_event(task_id: str, event: str, level: str = "INFO", **fields: Any) -> Dict[str, Any]:
     record: Dict[str, Any] = {
         "ts": utcnow_iso(),
@@ -272,14 +385,9 @@ def log_event(task_id: str, event: str, level: str = "INFO", **fields: Any) -> D
     record.update(fields)
 
     line = json.dumps(record, ensure_ascii=False, default=str)
-    try:
-        ensure_log_dirs()
-        with open(UNIFIED_LOG_FILE, "a", encoding="utf-8") as unified:
-            unified.write(line + "\n")
-        with open(TASK_LOG_DIR / f"{task_id}.jsonl", "a", encoding="utf-8") as per_task:
-            per_task.write(line + "\n")
-    except OSError as exc:  # logging must never break task execution
-        logger.error("failed to write task log for %s: %s", task_id, exc)
+    urgent = record["level"] in ("ERROR", "CRITICAL")
+    _buffer_line(UNIFIED_LOG_FILE, line, urgent=urgent)
+    _buffer_line(TASK_LOG_DIR / f"{task_id}.jsonl", line, urgent=urgent)
 
     level_no = getattr(logging, record["level"], logging.INFO)
     logger.log(level_no, "%s %s %s", task_id, event, line)
@@ -287,15 +395,124 @@ def log_event(task_id: str, event: str, level: str = "INFO", **fields: Any) -> D
 
 
 def write_output_file(task_id: str, stream: str, content: str) -> Optional[str]:
-    """Persist the full stdout/stderr of a run next to the per-task jsonl log."""
+    """Persist stdout/stderr of a run (bounded by MAX_OUTPUT_CHARS)."""
     try:
         ensure_log_dirs()
         path = TASK_LOG_DIR / f"{task_id}.{stream}.txt"
-        path.write_text(content or "", encoding="utf-8")
+        path.write_text(_truncate(content or ""), encoding="utf-8")
         return str(path)
     except OSError as exc:
         logger.error("failed to write %s file for %s: %s", stream, task_id, exc)
         return None
+
+
+_TRACE_LOCK = threading.Lock()
+_TRACE_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def trace_event(task_id: str, event: Dict[str, Any]) -> None:
+    """Append one agent event to logs/tasks/<task_id>.events.jsonl (bounded)."""
+    path = TASK_LOG_DIR / f"{task_id}.events.jsonl"
+    line = json.dumps(event, ensure_ascii=False, default=str)
+    with _TRACE_LOCK:
+        state = _TRACE_STATE.setdefault(task_id, {"count": 0, "bytes": 0, "truncated": False})
+        if state["truncated"]:
+            return
+        size = len(line.encode("utf-8", "ignore"))
+        if state["count"] >= AGENT_TRACE_MAX_EVENTS or state["bytes"] + size > AGENT_TRACE_MAX_BYTES:
+            state["truncated"] = True
+            marker = json.dumps(
+                {
+                    "ts": utcnow_iso(),
+                    "type": "trace.truncated",
+                    "events": state["count"],
+                    "bytes": state["bytes"],
+                },
+                ensure_ascii=False,
+            )
+            _buffer_line(path, marker, urgent=True)
+            return
+        state["count"] += 1
+        state["bytes"] += size
+    _buffer_line(path, line)
+
+
+def prune_logs() -> Dict[str, int]:
+    """Delete expired log files, then trim by total size. Returns counters."""
+    flush_logs()
+    ensure_log_dirs()
+    now = time.time()
+    cutoff = now - LOG_RETENTION_DAYS * 86400
+    recent_guard = now - 3600
+    files: List[tuple[Path, float, int]] = []
+
+    def collect(path: Path) -> None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        if not path.is_file():
+            return
+        files.append((path, stat.st_mtime, stat.st_size))
+
+    for path in TASK_LOG_DIR.iterdir() if TASK_LOG_DIR.exists() else []:
+        collect(path)
+    for path in LOG_DIR.glob(f"{UNIFIED_LOG_FILE.name}.*"):
+        collect(path)
+
+    removed = 0
+    for path, mtime, _size in list(files):
+        if mtime < cutoff and mtime < recent_guard:
+            try:
+                path.unlink()
+                files.remove((path, mtime, _size))
+                removed += 1
+            except OSError:
+                pass
+
+    total = sum(size for _path, _mtime, size in files)
+    if total > LOG_DIR_MAX_BYTES:
+        for path, mtime, size in sorted(files, key=lambda item: item[1]):
+            if total <= LOG_DIR_MAX_BYTES:
+                break
+            if mtime >= recent_guard:
+                continue
+            try:
+                path.unlink()
+                total -= size
+                removed += 1
+            except OSError:
+                pass
+
+    return {"removed": removed, "bytes": total, "files": len(files)}
+
+
+def start_log_maintenance() -> None:
+    """Prune now, then hourly in a daemon thread (idempotent)."""
+    global _LOG_MAINTENANCE_STARTED
+    if _LOG_MAINTENANCE_STARTED:
+        return
+    _LOG_MAINTENANCE_STARTED = True
+    try:
+        flush_logs()
+        prune_logs()
+    except Exception as exc:  # noqa: BLE001 - maintenance must never block startup
+        logger.warning("initial log prune failed: %s", exc)
+
+    def loop() -> None:
+        while True:
+            time.sleep(3600)
+            try:
+                prune_logs()
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=loop, name="log-pruner", daemon=True).start()
+
+
+_LOG_MAINTENANCE_STARTED = False
+atexit.register(flush_logs)
+
 
 
 def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:

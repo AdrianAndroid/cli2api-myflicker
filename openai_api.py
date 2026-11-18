@@ -122,12 +122,14 @@ def _estimate_tokens(text: str) -> int:
 
 def _submit(prompt: str, args_prefix: List[str], timeout: float, cwd: Optional[str],
             env: Optional[Dict[str, str]], source: str, identity: Identity,
-            stdin_payload: Optional[str] = None) -> Dict[str, Any]:
+            stdin_payload: Optional[str] = None,
+            request_id: Optional[str] = None) -> Dict[str, Any]:
     task_id = uuid.uuid4().hex
     submitted_at = utcnow_iso()
     command = list(args_prefix) if stdin_payload else list(args_prefix) + [prompt]
     state = {
         "task_id": task_id,
+        "request_id": request_id,
         "status": "pending",
         "args": command,
         "cmd": ["MYFLICKER_BIN", *command],
@@ -149,7 +151,15 @@ def _submit(prompt: str, args_prefix: List[str], timeout: float, cwd: Optional[s
         "events": [],
     }
     save_task_state(task_id, state)
-    log_event(task_id, "task.submitted", args=command, source=source, timeout=timeout, cwd=cwd)
+    log_event(
+        task_id,
+        "task.submitted",
+        args=command,
+        source=source,
+        timeout=timeout,
+        cwd=cwd,
+        request_id=request_id,
+    )
     run_myflicker.apply_async(
         kwargs={
             "task_id": task_id,
@@ -164,7 +174,14 @@ def _submit(prompt: str, args_prefix: List[str], timeout: float, cwd: Optional[s
         task_id=task_id,
         queue=identity.queue,
     )
-    log_event(task_id, "task.enqueued", queue=identity.queue, celery_task_id=task_id, via="openai")
+    log_event(
+        task_id,
+        "task.enqueued",
+        queue=identity.queue,
+        celery_task_id=task_id,
+        via=source,
+        request_id=request_id,
+    )
     return {"task_id": task_id, "submitted_at": submitted_at, "command": command}
 
 
@@ -393,6 +410,54 @@ async def chat_completions(
     return _result_payload(submitted["task_id"], model, prompt, state)
 
 
+async def iter_task_stream(task_id: str, timeout: float) -> AsyncIterator[Dict[str, Any]]:
+    """Protocol-neutral reader for a task's stdout stream.
+
+    Yields {"type": "text", "text": ...} for each stdout chunk,
+    {"type": "keepalive"} roughly every 10s, {"type": "timeout"} when the
+    deadline passes, and finally {"type": "end"} after draining leftovers.
+    """
+    import asyncio
+
+    index = 0
+    deadline = time.monotonic() + timeout + 5
+    last_ping = time.monotonic()
+    finished = False
+
+    while not finished:
+        chunks, index = read_stream(task_id, index)
+        for chunk in chunks:
+            if chunk.get("stream") == "__end__":
+                finished = True
+                break
+            if chunk.get("stream") != "stdout":
+                continue
+            text = chunk.get("text") or ""
+            if text:
+                yield {"type": "text", "text": text}
+
+        state = load_task_state(task_id) or {}
+        if not finished and state.get("status") in ("success", "failure", "canceled"):
+            finished = True
+        if finished:
+            break
+
+        if time.monotonic() > deadline:
+            yield {"type": "timeout"}
+            break
+
+        if time.monotonic() - last_ping > 10:
+            last_ping = time.monotonic()
+            yield {"type": "keepalive"}
+        await asyncio.sleep(0.15)
+
+    leftovers, _ = read_stream(task_id, index)
+    for chunk in leftovers:
+        if chunk.get("stream") == "stdout" and chunk.get("text"):
+            yield {"type": "text", "text": chunk["text"]}
+    yield {"type": "end"}
+
+
 async def _sse(
     task_id: str,
     model: str,
@@ -402,11 +467,8 @@ async def _sse(
 ) -> AsyncIterator[str]:
     """SSE stream. Text mode forwards stdout chunks; events mode forwards the
     agent's structured events (session id, reasoning, tool calls, results)."""
-    import asyncio
-
     created = int(time.time())
     chunk_id = f"chatcmpl-{task_id[:24]}"
-    index = 0
     emitted_any = False
 
     def frame(delta: Dict[str, Any], finish: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> str:
@@ -424,98 +486,62 @@ async def _sse(
 
     yield frame({"role": "assistant", "content": ""})
 
-    deadline = time.monotonic() + timeout + 5
-    last_ping = time.monotonic()
-    finished = False
     previous_text = ""
     session_id: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
 
-    while not finished:
-        chunks, index = read_stream(task_id, index)
-        for chunk in chunks:
-            if chunk.get("stream") == "__end__":
-                finished = True
-                break
-            if chunk.get("stream") != "stdout":
-                continue
-            text = chunk.get("text") or ""
-            if not text:
-                continue
-
-            if not events_mode:
-                emitted_any = True
-                yield frame({"content": text})
-                continue
-
-            line = text.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                emitted_any = True
-                yield frame({"content": text})
-                continue
-
-            kind = event.get("type")
-            if kind == "text":
-                snapshot = event.get("text") or ""
-                if snapshot.startswith(previous_text):
-                    delta = snapshot[len(previous_text):]
-                else:
-                    delta = snapshot
-                if not event.get("partial"):
-                    previous_text = ""
-                else:
-                    previous_text = snapshot
-                if delta:
-                    emitted_any = True
-                    yield frame({"content": delta}, extra={"x_myflicker_event": event})
-                continue
-
-            if kind == "system" and event.get("subtype") == "init":
-                session_id = event.get("sessionId") or session_id
-            if kind == "result":
-                usage = event.get("usage") or usage
-                session_id = event.get("sessionId") or session_id
-
-            yield frame({}, extra={"x_myflicker_event": event})
-
-        state = load_task_state(task_id) or {}
-        if not finished and state.get("status") in ("success", "failure", "canceled"):
-            finished = True
-        if finished:
-            break
-
-        if time.monotonic() > deadline:
-            yield frame({"content": f"\n[gateway] task {task_id} exceeded {timeout}s\n"})
-            break
-
-        if time.monotonic() - last_ping > 10:
-            last_ping = time.monotonic()
+    async for item in iter_task_stream(task_id, timeout):
+        kind = item.get("type")
+        if kind == "keepalive":
             yield ": keep-alive\n\n"
-        await asyncio.sleep(0.15)
+            continue
+        if kind == "timeout":
+            yield frame({"content": f"\n[gateway] task {task_id} exceeded {timeout}s\n"})
+            continue
+        if kind == "end":
+            break
 
-    state = load_task_state(task_id) or {}
-    leftovers, _ = read_stream(task_id, index)
-    for chunk in leftovers:
-        if chunk.get("stream") == "stdout" and chunk.get("text"):
-            text = chunk["text"]
-            if events_mode:
-                try:
-                    event = json.loads(text.strip())
-                except json.JSONDecodeError:
-                    event = None
-                if event is not None:
-                    if event.get("type") == "text" and event.get("text"):
-                        emitted_any = True
-                        yield frame({"content": event["text"]}, extra={"x_myflicker_event": event})
-                    else:
-                        yield frame({}, extra={"x_myflicker_event": event})
-                    continue
+        text = item.get("text") or ""
+        if not events_mode:
             emitted_any = True
             yield frame({"content": text})
+            continue
+
+        line = text.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            emitted_any = True
+            yield frame({"content": text})
+            continue
+
+        kind = event.get("type")
+        if kind == "text":
+            snapshot = event.get("text") or ""
+            if snapshot.startswith(previous_text):
+                delta = snapshot[len(previous_text):]
+            else:
+                delta = snapshot
+            if not event.get("partial"):
+                previous_text = ""
+            else:
+                previous_text = snapshot
+            if delta:
+                emitted_any = True
+                yield frame({"content": delta}, extra={"x_myflicker_event": event})
+            continue
+
+        if kind == "system" and event.get("subtype") == "init":
+            session_id = event.get("sessionId") or session_id
+        if kind == "result":
+            usage = event.get("usage") or usage
+            session_id = event.get("sessionId") or session_id
+
+        yield frame({}, extra={"x_myflicker_event": event})
+
+    state = load_task_state(task_id) or {}
 
     if not emitted_any and state.get("status") != "success":
         detail = state.get("error") or state.get("status") or "unknown error"

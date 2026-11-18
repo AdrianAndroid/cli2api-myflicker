@@ -10,3 +10,4 @@ desktop/dist/
 desktop/release/
 desktop/.vite/
 workspace/
+.idea/
